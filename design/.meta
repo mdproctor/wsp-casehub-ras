@@ -1,0 +1,9 @@
+branch: issue-1-core-ras-api
+project-sha: c8efbf391bc7b76202941e702d23660962a72785
+date: 2026-06-18
+issue: 1
+issue-repo: casehubio/casehub-ras
+covers: 1
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
