@@ -1,0 +1,9 @@
+branch: issue-10-drools-test-coverage-and-config
+project-sha: c516c54edf0d56f24b7779068113db9ddadea750
+date: 2026-06-21
+issue: 10
+issue-repo: casehubio/casehub-ras
+covers: 10,8
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
