@@ -2,28 +2,36 @@
 
 ## What Changed
 
-Epic 1 (Core RAS API) complete and merged to main. All API types, SPIs, InMemorySituationStore,
-and test fixtures implemented. Design went through three review rounds — key outcomes:
-CloudEvent replaces SensoryEvent (no wrapper), Model B routing (engine routes, ganglia evaluate),
-engine-api removed from api/ classpath, sealed ChainMode hierarchy.
+Epic 4 (DroolsGanglion) complete and merged to main. `ras-drools/` module implements
+`DroolsGanglion` — optional Drools CEP ganglion using classic kie-api (10.1.0). Configurable
+session modes (LONG_LIVED/EPHEMERAL), pseudo clock driven by CloudEvent timestamps,
+`DroolsObjectExtractor` SPI for fact extraction, `DroolsSessionStore` SPI for session lifecycle.
+`Ganglion.close()` added to the SPI in `casehub-ras-api` — lifecycle callback for situation
+termination, fixing a leak that affects all stateful ganglia.
 
 ## Immediate Next Step
 
 Start Epic 2 (RAS Runtime — #2): RasEngine, CompositeEventCorrelator, CaseTriggerService.
 Run `/work` to begin.
 
+## What's Left
+
+- `#10` — DroolsGanglion minor test coverage improvements (close() ephemeral test, null clock test, buildAll consistency) · XS · Low
+
 ## What's Next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| #2 | RAS Runtime — RasEngine, CompositeEventCorrelator, CaseTriggerService | L | High | Blocked by #1 (done) |
-| #3 | JavaSwitchGanglion — built-in fast-path deterministic detection | M | Med | Blocked by #1 (done) |
-| #4 | DroolsGanglion — Drools CEP for temporal pattern detection | L | High | Blocked by #1 (done), #2 |
-| #5 | Platform stream infrastructure — CloudEvent producers | L | High | Separate repo (platform#98 done) |
+| #2 | RAS Runtime — RasEngine, CompositeEventCorrelator, CaseTriggerService | L | High | Ready — #1 done |
+| #3 | JavaSwitchGanglion — built-in fast-path deterministic detection | M | Med | Ready — #1 done |
+| #5 | Platform stream infrastructure — CloudEvent producers | L | High | Separate repo |
 | #6 | Service lifecycle management — long-lived case + RAS + child ganglion cases | M | High | Design issue |
+| #7 | Persistent DroolsSessionStore (restart survival) | M | High | Blocked by #4 (done) |
+| #8 | DroolsGanglion configurable result collection strategy | S | Med | Blocked by #4 (done) |
+| #9 | DroolsGanglion hot rule reload | M | High | Blocked by #4 (done) |
 
 ## References
 
-- Design spec: `docs/superpowers/specs/2026-06-18-epic1-core-ras-api-design.md`
-- Original spec: `docs/superpowers/specs/2026-06-12-casehub-ras-design.md`
-- Blog: `blog/2026-06-20-mdp01-the-api-that-didnt-wrap.md`
+- DroolsGanglion spec: `docs/superpowers/specs/2026-06-21-epic4-drools-ganglion-design.md`
+- Epic 1 spec: `docs/superpowers/specs/2026-06-18-epic1-core-ras-api-design.md`
+- Blog: `blog/2026-06-21-mdp01-the-ganglion-that-got-reviewed-four-times.md`
