@@ -1,0 +1,9 @@
+branch: issue-2-ras-runtime
+project-sha: d59a7badd929babd5f95dfa36b3a2adf30afe7c1
+date: 2026-06-24
+issue: 2
+issue-repo: casehubio/casehub-ras
+covers: 2
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
