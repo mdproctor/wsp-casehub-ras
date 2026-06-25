@@ -1,0 +1,9 @@
+branch: issue-13-s-scale-deferrals
+project-sha: ffad28187b8a8fc5ec859b0b7e972927afa837cb
+date: 2026-06-25
+issue: 13
+issue-repo: casehubio/casehub-ras
+covers: 13,15,12
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
