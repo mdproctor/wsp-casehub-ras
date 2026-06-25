@@ -1,5 +1,5 @@
-# Branch Closed: issue-1-core-ras-api
+# Branch Closed: issue-2-ras-runtime
 
-**Date:** 2026-06-20
-**Issues:** 1
+**Date:** 2026-06-25
+**Issues:** 2
 **Status:** merged to main
