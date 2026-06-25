@@ -1,5 +1,5 @@
-# Branch Closed: issue-1-core-ras-api
+# Branch Closed: issue-13-s-scale-deferrals
 
-**Date:** 2026-06-20
-**Issues:** 1
+**Date:** 2026-06-25
+**Issues:** 13,15,12
 **Status:** merged to main
