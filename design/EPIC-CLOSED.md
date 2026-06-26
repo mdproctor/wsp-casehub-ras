@@ -1,5 +1,5 @@
-# Branch Closed: issue-1-core-ras-api
+# Branch Closed: issue-3-java-switch-ganglion
 
-**Date:** 2026-06-20
-**Issues:** 1
+**Date:** 2026-06-26
+**Issues:** 3
 **Status:** merged to main
