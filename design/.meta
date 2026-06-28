@@ -1,0 +1,9 @@
+branch: issue-18-clustered-retry-logic
+project-sha: 56e6b24d688b61ee2ce28df2c09e0a8aee292709
+date: 2026-06-28
+issue: 18
+issue-repo: casehubio/casehub-ras
+covers: 18
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
