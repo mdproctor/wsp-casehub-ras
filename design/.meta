@@ -1,0 +1,9 @@
+branch: issue-21-trigger-cleanup-long-lived-situations
+project-sha: 66ca4e609c61cbe5535ca7c0a67ec695f2cee143
+date: 2026-06-29
+issue: 21
+issue-repo: casehubio/casehub-ras
+covers: 21,20
+flyway-next-v: unknown
+design-repo: project
+design-section-hashes: 
