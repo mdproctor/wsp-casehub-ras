@@ -1,0 +1,4 @@
+extends: ~/.claude/blog-routing.yaml
+
+# ras workspace — blog entries live in blog/
+# All entries are entry_type: note → routed to _notes/ in mdproctor.github.io
