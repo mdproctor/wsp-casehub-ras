@@ -1,0 +1,9 @@
+branch: issue-19-duplicate-trigger-contract-test
+project-sha: 27de6a4860966615d6e243602bf1b31ed9a86346
+date: 2026-06-29
+issue: 19
+issue-repo: casehubio/casehub-ras
+covers: 19,17
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
