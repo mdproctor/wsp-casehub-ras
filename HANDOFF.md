@@ -1,38 +1,29 @@
 # HANDOFF — casehub-ras
 
 **Date:** 2026-06-30
-**Branch closed:** issue-21-trigger-cleanup-long-lived-situations → merged to main
-**Issues:** #21 (closed), #20 (closed)
+**Issues:** #22 (closed)
 
 ## What was done
 
-Trigger lifecycle model and situation query API.
+Cross-repo migration of situation types from desiredstate-api to ras-api (#22).
 
-- **TriggerDecision** gains `CREATE_CASE_AND_CONTINUE` and `RESOLVE` variants — five total.
-- **TriggerMode** sealed interface (`FireOnce`, `Repeating(Duration cooldown)`) on `SituationDefinition`.
-- **SituationStore SPI**: `save()` returns `Uni<SituationContext>` with storeVersion;
-  `tryClaimTrigger` atomically stamps `lastTriggered`/`triggerCount` (store-managed fields).
-  New `removeTriggeredBefore`, `findActive` methods.
-- **Guard cleanup** in `SituationExpiryJob` — resolves #21 (stuck persistent policyTriggered entities).
-- **SituationSource/ActiveSituation/SituationChangeEvent** query API in api/ — authoritative
-  versions for #22's cross-repo migration from desiredstate-api.
-- **DefaultSituationSource**, YAML `triggerMode` parsing, `RasEndpointRegistration` (QUERY in EndpointRegistry).
+- **casehub-desiredstate** (`issue-22-move-situation-types` branch, pushed): deleted ActiveSituation, SituationSource, SituationChangeEvent from api/, DefaultSituationSource stub from runtime/. Added ras-api dependency.
+- **casehub-ops** (`issue-22-move-situation-types` branch, pushed): updated imports in 4 production + 4 test files. Expanded ActiveSituation (4→8 fields), SituationChangeEvent (1→4 fields), reactive SituationSource (List→Uni). Fixed pre-existing AgentCapability constructor breakage (capabilityVocabulary field added).
+- **casehub-ops #6** updated: split into epic casehub-ops#29 with sub-issues #30 (service-as-case modelling) and #31 (operational efficiency). RAS #6 scoped to RAS-specific integration, blocked by ops#30.
 
 ## Key decisions
 
-- Trigger metadata (`lastTriggered`, `triggerCount`) is store-managed: stamped by `tryClaimTrigger`,
-  preserved by `save()` (mapper excludes from `updateEntity`). Design review R2-02 caught that
-  naive save would overwrite.
-- `CREATE_CASE_AND_CONTINUE` uses save-first (no bifurcation) — detection always persisted
-  before claiming. Loser returns false (continues accumulating).
-- Guard period (default PT1M) prevents GC-pause duplicate race on entity removal.
-- RAS reclassified as Foundation tier (casehubio/parent#327 filed).
-- Situation types move from desiredstate-api to ras-api (#22 filed).
+- ChannelDriftChecker migration (qhorus runtime→api Channel types) deferred — deeper than import swaps (Panache entities→records, CSV strings→typed collections). Needs its own issue.
+- Service lifecycle epic moved from casehub-ras to casehub-ops — it's a Case/engine concern, not RAS.
+
+## Immediate next step
+
+The ops and desiredstate branches need merging. No remaining ras work — pick from backlog.
 
 ## What's next
 
-- **#22** — Move ActiveSituation/SituationSource/SituationChangeEvent from desiredstate-api to
-  ras-api + update ops-deployment imports. Cross-repo, blocked by parent#327.
-- **#5** — Platform stream infrastructure (epic, separate design).
-- **#6** — Service lifecycle management pattern (design).
-- **#7** — DroolsSessionStore persistent implementation.
+| # | Description | Scale | Complexity | Notes |
+|---|-------------|-------|------------|-------|
+| 7 | DroolsSessionStore persistent implementation | M | Med | Unblocked |
+| 6 | RAS integration with service lifecycle cases | M | Med | Blocked by ops#30 |
+| 5 | Platform stream infrastructure | XL | High | Epic, needs design |
