@@ -20,10 +20,15 @@ Cross-repo migration of situation types from desiredstate-api to ras-api (#22).
 
 The ops and desiredstate branches need merging. No remaining ras work — pick from backlog.
 
+## Cross-repo issues filed (2026-07-05)
+
+- **ras#27** — Promote SPI extension types (`CorrelationKeyExtractor`, `SituationDefinitionProvider`, `SituationRegistration`) from `io.casehub.ras.runtime` to `io.casehub.ras.api`. Filed during adversarial design review of casehub-desiredstate spec (constraint-evaluation-model). Non-breaking move. Scale: S, Complexity: Low.
+
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
+| 27 | Promote SPI types to ras-api | S | Low | Filed from desiredstate ADR |
 | 7 | DroolsSessionStore persistent implementation | M | Med | Unblocked |
 | 6 | RAS integration with service lifecycle cases | M | Med | Blocked by ops#30 |
 | 5 | Platform stream infrastructure | XL | High | Epic, needs design |
