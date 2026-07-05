@@ -1,5 +1,5 @@
-# Branch Closed: issue-1-core-ras-api
+# Branch Closed: issue-27-api-spi-and-chainmode
 
-**Date:** 2026-06-20
-**Issues:** 1
+**Date:** 2026-07-05
+**Issues:** 27,23,24,25,26
 **Status:** merged to main
