@@ -1,0 +1,9 @@
+branch: issue-6-service-lifecycle-ras-integ
+project-sha: bdb0db6c08a5ceb1b6313c937fad3429f7659a16
+date: 2026-07-06
+issue: 6
+issue-repo: casehubio/casehub-ras
+covers: 6
+flyway-next-v: unknown
+design-repo: project
+design-section-hashes: 
