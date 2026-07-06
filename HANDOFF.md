@@ -1,37 +1,37 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-05
-**Issues:** #27, #23 (closed as dup), #24, #25, #26
+**Date:** 2026-07-06
+**Issues:** #7 (closed)
 
 ## What was done
 
-API module refinement and ChainMode extensions across 5 issues on one branch.
-
-- **SPI promotion (#27):** moved CorrelationKeyExtractor, DefaultCorrelationKeyExtractor, SituationDefinitionProvider, SituationRegistration from runtime to api. Domain adapters (e.g. desiredstate/ras-adapter) can now depend on casehub-ras-api alone.
-- **Artifact naming (#24):** casehub-ras-jpa → casehub-ras-persistence-jpa, casehub-ras-memory → casehub-ras-persistence-memory. Fixes broken IoT webapp reference.
-- **ChainMode.Streak (#25):** consecutive detection with ANTI reset. Single ganglion, NOISE ignored.
-- **ChainMode.Rate (#26):** ratio-based sliding window over scoreable signals. Multi-ganglion, window must be full.
-- **#23:** closed as duplicate of #27.
+Persistent DroolsSessionStore implementation (#7). Redesigned DroolsSessionStore SPI from
+get()/put()/remove() with four strings to Map-aligned `computeIfAbsent(DroolsSessionKey,
+KieBase, config, generation)` with generation-based lazy invalidation. New `drools-reliability/`
+module provides ReliableDroolsSessionStore backed by H2MVStore — sessions survive JVM restarts.
+Design-reviewed (3 rounds, 15 issues, all resolved). Four drools-reliability gotchas captured
+in the garden.
 
 ## Key decisions
 
-- DefaultCorrelationKeyExtractor moved to api (not just the interface) — default behaviour is an API contract.
-- Rate window must be full before triggering — prevents premature triggers on sparse data.
-- Compaction constraint documented: Streak, Rate, Count, Sequence should use no-op compaction ganglia on persistent situations.
+- `removeAll()` eliminated from SPI — contradicts hot reload spec's per-key serialization model.
+  Replaced with generation parameter on `computeIfAbsent` for lazy invalidation.
+- Separate module (`drools-reliability/`) rather than optional deps in ras-drools — matches
+  persistence-memory/persistence-jpa pattern.
+- CDI Tier 2 (`@ApplicationScoped`) beats InMemory's Tier 1 (`@DefaultBean`) by classpath presence.
+- Experimental/temporary — journal-based reliability (#29) will replace this.
 
 ## Cross-repo follow-up
 
-- casehub-desiredstate#70 — drop runtime dep from ras-adapter (blocked by #27 publish)
-- casehub-parent#347 — platform-wide artifact naming audit
+- casehub-desiredstate#70 — drop runtime dep from ras-adapter (blocked by ras artifact publish)
 
 ## Immediate next step
 
-Publish casehub-ras artifacts so desiredstate#70 can proceed. Then pick from backlog.
+Publish casehub-ras artifacts so desiredstate#70 can proceed.
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| 7 | DroolsSessionStore persistent implementation | M | Med | Blocked by #4. Needs Drools 10 serialization investigation. |
-| 6 | RAS integration with service lifecycle cases | M | Med | Blocked by ops#30 (still open). |
-| 5 | Platform stream infrastructure | XL | High | Epic, needs design. Lives in casehub-platform. |
+| 6 | RAS integration with service lifecycle cases | M | Med | Blocked by ops#30 (still open) |
+| 5 | Platform stream infrastructure | XL | High | Epic, needs design. Lives in casehub-platform |
