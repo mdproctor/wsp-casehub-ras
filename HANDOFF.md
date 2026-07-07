@@ -1,37 +1,46 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-06
-**Issues:** #7 (closed)
+**Date:** 2026-07-07
+**Issues:** #6 (closed)
 
 ## What was done
 
-Persistent DroolsSessionStore implementation (#7). Redesigned DroolsSessionStore SPI from
-get()/put()/remove() with four strings to Map-aligned `computeIfAbsent(DroolsSessionKey,
-KieBase, config, generation)` with generation-based lazy invalidation. New `drools-reliability/`
-module provides ReliableDroolsSessionStore backed by H2MVStore — sessions survive JVM restarts.
-Design-reviewed (3 rounds, 15 issues, all resolved). Four drools-reliability gotchas captured
-in the garden.
+Service lifecycle RAS integration (#6). Extended casehub-ras to support signaling existing
+cases via enriched CDI events, dynamic situation registration, and a generalized trigger output
+model. TriggerAction sealed interface (CreateCase | NotifyOnly) replaces mandatory
+CaseTriggerConfig. SituationChangeEvent enriched with SituationContext. Dynamic
+register/deregister on SituationDefinitionRegistry via copy-on-write RegistrySnapshot.
+SituationEvaluator dispatches on TriggerAction with different delivery semantics: NotifyOnly
+awaits CDI event delivery with claim reset on failure; CreateCase remains fire-and-forget.
+YAML triggerAction format with type discriminator. SituationStore.removeAllForSituation()
+for persistent situation cleanup. Design-reviewed (5 rounds, 12 issues, all verified).
+Per-task code review (8 tasks). Final whole-branch code review (5 findings, all fixed).
 
 ## Key decisions
 
-- `removeAll()` eliminated from SPI — contradicts hot reload spec's per-key serialization model.
-  Replaced with generation parameter on `computeIfAbsent` for lazy invalidation.
-- Separate module (`drools-reliability/`) rather than optional deps in ras-drools — matches
-  persistence-memory/persistence-jpa pattern.
-- CDI Tier 2 (`@ApplicationScoped`) beats InMemory's Tier 1 (`@DefaultBean`) by classpath presence.
-- Experimental/temporary — journal-based reliability (#29) will replace this.
+- Approach B (enriched CDI events with consumer bridge) over Approach A (RAS signals cases
+  directly). RAS stays decoupled from engine case model; bridge code is inherently
+  domain-specific and belongs in the consuming app.
+- TriggerDecision renamed: CREATE_CASE → TRIGGER, CREATE_CASE_AND_CONTINUE →
+  TRIGGER_AND_CONTINUE. Names now describe situation lifecycle, not case lifecycle.
+- Ganglion-as-case deferred to #31 — RAS already has purpose-built persistence
+  (DroolsSessionStore, JpaSituationStore). Case blackboard is coordination medium, not
+  computation buffer.
+- NotifyOnly delivery awaits CDI event; CreateCase event is fire-and-forget. The case is the
+  durable artifact for CreateCase; the event IS the sole output for NotifyOnly.
 
 ## Cross-repo follow-up
 
-- casehub-desiredstate#70 — drop runtime dep from ras-adapter (blocked by ras artifact publish)
-
-## Immediate next step
-
-Publish casehub-ras artifacts so desiredstate#70 can proceed.
+- casehubio/casehub-desiredstate#71 — migrate DesiredStateSituationDefinitionProvider to TriggerAction API
+- casehubio/casehub-ops#47 — wire RAS health monitoring for managed applications (first consumer)
+- casehubio/casehub-ops#48 — migrate AdaptiveTopologyManager to enriched SituationChangeEvent
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| 6 | RAS integration with service lifecycle cases | M | Med | Blocked by ops#30 (still open) |
-| 5 | Platform stream infrastructure | XL | High | Epic, needs design. Lives in casehub-platform |
+| 31 | Ganglion-as-case — case-backed state persistence | M | High | Deferred from #6. Open question: is this still needed given DroolsSessionStore? |
+| 28 | DroolsSessionStore production hardening | S | Med | Monitoring, graceful degradation |
+| 29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
+| 30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
+| 5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
