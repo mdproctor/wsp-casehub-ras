@@ -1,5 +1,5 @@
-# Branch Closed: issue-1-core-ras-api
+# Branch Closed: issue-6-service-lifecycle-ras-integ
 
-**Date:** 2026-06-20
-**Issues:** 1
+**Date:** 2026-07-07
+**Issues:** 6
 **Status:** merged to main
