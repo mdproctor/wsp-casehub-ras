@@ -1,0 +1,9 @@
+branch: issue-28-drools-session-store-hardening
+project-sha: c487c4f5f9a3e3a992753030fd30f3c5a1286ae3
+date: 2026-07-07
+issue: 28
+issue-repo: casehubio/casehub-ras
+covers: 28
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
