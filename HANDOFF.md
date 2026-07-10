@@ -29,6 +29,14 @@ Per-task code review (8 tasks). Final whole-branch code review (5 findings, all 
 - NotifyOnly delivery awaits CDI event; CreateCase event is fire-and-forget. The case is the
   durable artifact for CreateCase; the event IS the sole output for NotifyOnly.
 
+## Cross-repo changes (2026-07-10, from casehub-iot session)
+
+- **Branch:** `issue-34-jackson-type-info` — pushed to origin
+- **Commit:** `29cdf5c` — adds `@JsonTypeInfo`/`@JsonSubTypes` to `TriggerAction`, `ChainMode`, `TriggerMode` sealed interfaces in casehub-ras-api. Adds `jackson-annotations` as `provided` scope dependency.
+- **Issue:** casehubio/casehub-ras#34
+- **Why:** casehub-iot webapp stores `SituationDefinition` as JSONB in PostgreSQL. Without Jackson type info, polymorphic deserialization of these sealed interfaces fails. Same pattern as casehub-iot-api's `DeviceTypeIdResolver`.
+- **Status:** Branch pushed, not yet merged to main. Installed to local Maven repo for casehub-iot build.
+
 ## Cross-repo follow-up
 
 - casehubio/casehub-desiredstate#71 — migrate DesiredStateSituationDefinitionProvider to TriggerAction API
