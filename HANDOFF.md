@@ -1,46 +1,41 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-07
-**Issues:** #6 (closed)
+**Date:** 2026-07-10
+**Issues:** #28 (closed)
 
 ## What was done
 
-Service lifecycle RAS integration (#6). Extended casehub-ras to support signaling existing
-cases via enriched CDI events, dynamic situation registration, and a generalized trigger output
-model. TriggerAction sealed interface (CreateCase | NotifyOnly) replaces mandatory
-CaseTriggerConfig. SituationChangeEvent enriched with SituationContext. Dynamic
-register/deregister on SituationDefinitionRegistry via copy-on-write RegistrySnapshot.
-SituationEvaluator dispatches on TriggerAction with different delivery semantics: NotifyOnly
-awaits CDI event delivery with claim reset on failure; CreateCase remains fire-and-forget.
-YAML triggerAction format with type discriminator. SituationStore.removeAllForSituation()
-for persistent situation cleanup. Design-reviewed (5 rounds, 12 issues, all verified).
-Per-task code review (8 tasks). Final whole-branch code review (5 findings, all fixed).
+DroolsSessionStore production hardening (#28). Added Micrometer metrics instrumentation
+(6 counters, 1 gauge, 1 timer — optional via `Instance<MeterRegistry>`), `@Readiness`
+health check probing H2MVStore, typed `DroolsSessionStoreException` SPI error contract,
+and per-ganglion error isolation in `SituationEvaluator.runDetection()`. Fixed `@PreDestroy`
+to preserve persisted data — `dispose()` was deleting H2MVStore state on every graceful restart.
+Design-reviewed (3 rounds, 14 issues, all resolved). Garden entry GE-20260710-86e8d3 captured
+H2MVStore read/write asymmetry after `close()`.
 
 ## Key decisions
 
-- Approach B (enriched CDI events with consumer bridge) over Approach A (RAS signals cases
-  directly). RAS stays decoupled from engine case model; bridge code is inherently
-  domain-specific and belongs in the consuming app.
-- TriggerDecision renamed: CREATE_CASE → TRIGGER, CREATE_CASE_AND_CONTINUE →
-  TRIGGER_AND_CONTINUE. Names now describe situation lifecycle, not case lifecycle.
-- Ganglion-as-case deferred to #31 — RAS already has purpose-built persistence
-  (DroolsSessionStore, JpaSituationStore). Case blackboard is coordination medium, not
-  computation buffer.
-- NotifyOnly delivery awaits CDI event; CreateCase event is fire-and-forget. The case is the
-  durable artifact for CreateCase; the event IS the sole output for NotifyOnly.
+- Fail-fast for storage reads (can't proceed without knowing state), log-and-continue for
+  storage writes (session works, just not durable), silent recovery for corrupt sessions
+  (existing behavior preserved with counter)
+- Annotation-only library deps (`micrometer-core`, `microprofile-health-api`) per protocol
+  PP-20260604-88f660 — consuming app provides Quarkus extensions
+- No `StorageManager.close()` in `@PreDestroy` — static singleton breaks dev-mode restarts
+- Per-ganglion isolation: one ganglion's failure doesn't kill evaluation for others
 
 ## Cross-repo follow-up
 
-- casehubio/casehub-desiredstate#71 — migrate DesiredStateSituationDefinitionProvider to TriggerAction API
 - casehubio/casehub-ops#47 — wire RAS health monitoring for managed applications (first consumer)
 - casehubio/casehub-ops#48 — migrate AdaptiveTopologyManager to enriched SituationChangeEvent
+- casehubio/casehub-desiredstate#71 — migrate DesiredStateSituationDefinitionProvider to TriggerAction API
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| 31 | Ganglion-as-case — case-backed state persistence | M | High | Deferred from #6. Open question: is this still needed given DroolsSessionStore? |
-| 28 | DroolsSessionStore production hardening | S | Med | Monitoring, graceful degradation |
+| 32 | RAS runtime metrics instrumentation (SituationEvaluator, RasEngine) | M | Med | Filed during #28 design review |
+| 33 | H2MVStore file-corruption recovery | S | Med | Filed during #28 design review |
+| 31 | Ganglion-as-case — case-backed state persistence | M | High | Open question: still needed given DroolsSessionStore? |
 | 29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
 | 30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
 | 5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
