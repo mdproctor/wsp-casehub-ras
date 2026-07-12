@@ -1,39 +1,37 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-10
-**Issues:** #28 (closed)
+**Date:** 2026-07-13
+**Issues:** #32 (closed)
 
 ## What was done
 
-DroolsSessionStore production hardening (#28). Added Micrometer metrics instrumentation
-(6 counters, 1 gauge, 1 timer — optional via `Instance<MeterRegistry>`), `@Readiness`
-health check probing H2MVStore, typed `DroolsSessionStoreException` SPI error contract,
-and per-ganglion error isolation in `SituationEvaluator.runDetection()`. Fixed `@PreDestroy`
-to preserve persisted data — `dispose()` was deleting H2MVStore state on every graceful restart.
-Design-reviewed (3 rounds, 14 issues, all resolved). Garden entry GE-20260710-86e8d3 captured
-H2MVStore read/write asymmetry after `close()`.
+RAS runtime metrics instrumentation (#32). Centralised `RasMetrics` `@ApplicationScoped`
+bean with 22 metrics (18 counters, 2 timers, 2 gauges) across `RasEngine`,
+`SituationEvaluator`, and `SituationExpiryJob`. `SituationStore` API change:
+`removeExpired`/`removeTriggeredBefore` return `Uni<Integer>`. Design-reviewed
+(2 rounds, 14 issues resolved — NotifyOnly coverage, removeExpired contract,
+CDI cycle avoidance, timer placement). Garden entry GE-20260712-70d60c captured
+`ide_edit_member` class-vs-constructor ambiguity gotcha.
 
 ## Key decisions
 
-- Fail-fast for storage reads (can't proceed without knowing state), log-and-continue for
-  storage writes (session works, just not durable), silent recovery for corrupt sessions
-  (existing behavior preserved with counter)
-- Annotation-only library deps (`micrometer-core`, `microprofile-health-api`) per protocol
-  PP-20260604-88f660 — consuming app provides Quarkus extensions
-- No `StorageManager.close()` in `@PreDestroy` — static singleton breaks dev-mode restarts
-- Per-ganglion isolation: one ganglion's failure doesn't kill evaluation for others
+- Centralised `RasMetrics` bean (not inline per class) — single source of truth for
+  metric names, tags, null-guarding. Inline pattern stays for `drools-reliability`
+  (separate optional module)
+- Opaque timer handles (`Object`) — callers don't reference `Timer.Sample`, preventing
+  classloading when Micrometer absent
+- `trigger_action` tag (`create_case`/`notify_only`) on fire_time/fired/failed — covers
+  both TriggerAction paths without parallel metric names (R2-01 finding)
+- `removeExpired` stays abstract, `removeTriggeredBefore` stays default (R2-02 finding)
 
 ## Cross-repo follow-up
 
-- casehubio/casehub-ops#47 — wire RAS health monitoring for managed applications (first consumer)
-- casehubio/casehub-ops#48 — migrate AdaptiveTopologyManager to enriched SituationChangeEvent
-- casehubio/casehub-desiredstate#71 — migrate DesiredStateSituationDefinitionProvider to TriggerAction API
+*Unchanged — `git show HEAD~1:HANDOFF.md`*
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| 32 | RAS runtime metrics instrumentation (SituationEvaluator, RasEngine) | M | Med | Filed during #28 design review |
 | 33 | H2MVStore file-corruption recovery | S | Med | Filed during #28 design review |
 | 31 | Ganglion-as-case — case-backed state persistence | M | High | Open question: still needed given DroolsSessionStore? |
 | 29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
