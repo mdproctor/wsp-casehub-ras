@@ -1,5 +1,5 @@
-# Branch Closed: issue-6-service-lifecycle-ras-integ
+# Branch Closed: issue-32-ras-runtime-metrics
 
-**Date:** 2026-07-07
-**Issues:** 6
+**Date:** 2026-07-13
+**Issues:** 32
 **Status:** merged to main
