@@ -1,0 +1,9 @@
+branch: issue-36-naivebayes-persistence
+project-sha: e2d377026ee1455d671d5b19e31f0e716e7c7d6f
+date: 2026-07-13
+issue: 36
+issue-repo: casehubio/casehub-ras
+covers: 36
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
