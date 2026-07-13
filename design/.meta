@@ -1,0 +1,9 @@
+branch: issue-34-jackson-type-info-and-hardening
+project-sha: 6aa1923912d327f9e5468f5215f9113953a25ed5
+date: 2026-07-13
+issue: 34
+issue-repo: casehubio/casehub-ras
+covers: 34,35,33
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
