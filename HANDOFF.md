@@ -1,35 +1,36 @@
 # HANDOFF — casehub-ras
 
 **Date:** 2026-07-13
-**Issues:** #34 (closed), #35 (closed), #33 (closed)
+**Issues:** #31 (closed — won't do), #36 (filed)
 
 ## What was done
 
-Batched three issues on one branch: Jackson `@JsonTypeInfo`/`@JsonSubTypes` on
-`TriggerAction`, `ChainMode`, `TriggerMode` for JSONB polymorphic serde (#34);
-centralised `DroolsReliabilityMetrics` bean replacing inline `MeterRegistry` usage
-in `ReliableDroolsSessionStore` (#35); H2MVStore file-corruption auto-recovery at
-startup with probe-before-static-init pattern (#33). CLAUDE.md synced for all three
-changes including `removeExpired`/`removeTriggeredBefore` return type fix from #32.
+First-principles investigation of #31 (ganglion-as-case). Evaluated every
+stateful ganglion against the case-backed proposal. Conclusion: purpose-built
+persistence wins everywhere — DroolsSessionStore for CEP, SituationStore for
+accumulation. Case blackboard is a coordination medium, not a computation
+buffer. Circular dependency (`engine → ras → engine`) is a hard blocker
+regardless. Closed #31, filed #36 for the one real finding: NaiveBayesGanglion
+log-posteriors are in-memory only, lost on restart.
+
+Published 8 previously unpublished blog entries to casehub-notes (already
+on personal-notes). All 10 RAS blog entries now at both destinations.
 
 ## Key decisions
 
-- Jackson type discriminator names match YAML convention (`and`, `or`, `create-case`,
-  `fire-once` etc.) — single source of truth across serialisation formats
-- Corruption probe uses `static volatile boolean` gate — runs once per JVM to avoid
-  file-lock conflict with the Drools `StorageManagerFactory` static holder singleton
-- `jackson-annotations` is `provided` scope in api/ — consumers get it transitively
-  from Quarkus, api/ doesn't force it
+- RAS owns its own persistence — cases coordinate via events, not by reaching into ganglion state
+- Anything RAS needs from the platform belongs in `casehub-platform-api`
+- NaiveBayes persistence gap is a small standalone fix (#36), not a case-engine integration
 
-## Cross-repo follow-up
+## What's left
 
-*Unchanged — `git show HEAD~1:HANDOFF.md`*
+- #36 — NaiveBayesGanglion: persist log-posteriors across restarts · S · Med
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| 31 | Ganglion-as-case — case-backed state persistence | M | High | Open question: still needed given DroolsSessionStore? |
-| 29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
-| 30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
-| 5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
+| #36 | NaiveBayesGanglion persistence | S | Med | Persist `double[]` alongside situation context |
+| #29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
+| #30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
+| #5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
