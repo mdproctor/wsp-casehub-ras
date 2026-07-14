@@ -1,36 +1,31 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-13
-**Issues:** #31 (closed — won't do), #36 (filed)
+**Date:** 2026-07-14
+**Issues:** #36 (closed)
 
 ## What was done
 
-First-principles investigation of #31 (ganglion-as-case). Evaluated every
-stateful ganglion against the case-backed proposal. Conclusion: purpose-built
-persistence wins everywhere — DroolsSessionStore for CEP, SituationStore for
-accumulation. Case blackboard is a coordination medium, not a computation
-buffer. Circular dependency (`engine → ras → engine`) is a hard blocker
-regardless. Closed #31, filed #36 for the one real finding: NaiveBayesGanglion
-log-posteriors are in-memory only, lost on restart.
-
-Published 8 previously unpublished blog entries to casehub-notes (already
-on personal-notes). All 10 RAS blog entries now at both destinations.
+Implemented GanglionStateStore — pluggable persistence SPI for ganglion
+computation state. SPI in `api/` (`GanglionStateStore`, `GanglionStateKey`,
+`GanglionState`, `GanglionStateConflictException`), `InMemoryGanglionStateStore`
+`@DefaultBean` in `runtime/`, `JpaGanglionStateStore` in `persistence-jpa/`
+with entity, Flyway V5, and optimistic locking. NaiveBayesGanglion refactored
+to use the store with load/save/retry pattern. `SituationExpiryJob` wired for
+orphan cleanup via `removeOrphaned()`. Filed #39 for analogous DroolsSessionStore
+orphan gap.
 
 ## Key decisions
 
-- RAS owns its own persistence — cases coordinate via events, not by reaching into ganglion state
-- Anything RAS needs from the platform belongs in `casehub-platform-api`
-- NaiveBayes persistence gap is a small standalone fix (#36), not a case-engine integration
-
-## What's left
-
-- #36 — NaiveBayesGanglion: persist log-posteriors across restarts · S · Med
+- Generic SPI (not NaiveBayes-specific) — `double[]` reflects the domain of numeric accumulation ganglia
+- SPI in `api/` (dependency direction constraint), in-memory in `runtime/` (`@DefaultBean` needs quarkus-arc)
+- Module-local metrics in persistence-jpa/ (can't depend on runtime/ for RasMetrics)
+- Retry owned by ganglion, not evaluator — ganglion state conflicts independent of situation conflicts
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| #36 | NaiveBayesGanglion persistence | S | Med | Persist `double[]` alongside situation context |
+| #39 | DroolsSessionStore orphaned session cleanup | S | Med | Same removeOrphaned() pattern as GanglionStateStore |
 | #29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
 | #30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
 | #5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
