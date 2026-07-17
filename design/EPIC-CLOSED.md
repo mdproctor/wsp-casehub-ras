@@ -1,5 +1,5 @@
-# Branch Closed: issue-36-naivebayes-persistence
+# Branch Closed: issue-39-drools-session-store-orphan-cleanup
 
-**Date:** 2026-07-14
-**Issues:** 36
+**Date:** 2026-07-17
+**Issues:** 39
 **Status:** merged to main
