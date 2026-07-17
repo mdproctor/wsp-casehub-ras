@@ -1,0 +1,9 @@
+branch: issue-46-expression-evaluator-integration
+project-sha: 08a514c7dd4e3f1a38821114e7d397a9e4ac68fc
+date: 2026-07-17
+issue: 46
+issue-repo: casehubio/casehub-ras
+covers: 46
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
