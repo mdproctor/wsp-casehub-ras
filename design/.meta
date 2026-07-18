@@ -1,0 +1,9 @@
+branch: issue-49-jq-map-context-naivebayes-expr
+project-sha: 8da0844bef2be24cbd5124efc88705304a2ceec6
+date: 2026-07-18
+issue: 49
+issue-repo: casehubio/casehub-ras
+covers: 49,47
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
