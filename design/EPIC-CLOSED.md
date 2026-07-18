@@ -1,5 +1,5 @@
-# Branch Closed: issue-36-naivebayes-persistence
+# Branch Closed: issue-46-expression-evaluator-integration
 
-**Date:** 2026-07-14
-**Issues:** 36
+**Date:** 2026-07-18
+**Issues:** 46
 **Status:** merged to main
