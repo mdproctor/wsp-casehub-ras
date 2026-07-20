@@ -1,0 +1,9 @@
+branch: issue-48-evidence-extraction-expression-rules
+project-sha: 43e992823c4746cf9bb0ef3e2bb3ff191a8e0673
+date: 2026-07-20
+issue: 48
+issue-repo: casehubio/casehub-ras
+covers: 48,50
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
