@@ -1,38 +1,34 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-18
-**Issues:** #46 (closed), #47–#49 (filed)
+**Date:** 2026-07-20
+**Issues:** #49 (closed), #47 (closed), #50 (filed — expression-rule ganglion)
 
 ## What was done
 
-Implemented ExpressionEvaluator integration (#46) — expression-based correlation
-key extraction, pre-ganglion event filtering, and dynamic case data in YAML situation
-definitions. Three new fields on `SituationDefinition`, `EventFilter` interface,
-`SituationRegistration` extended with compiled expressions. Registry-based compilation
-at registration time via `ExpressionEngineRegistry`. JqMapAdapter bridges Map→JsonNode
-for JQ engine. New `StringExpressionEvaluator` sub-interface in platform-api.
-Also committed to platform repo (casehub-platform).
-
-Design review ($14.94, 4 rounds, 18 issues) caught: missing `expression()` accessor,
-wrong placement of `dynamicCaseData`, JQ context type incompatibility, merge order
-vulnerability. Garden entry: Jackson `valueToTree()` + OffsetDateTime gotcha
-(GE-20260718-expr01).
+Closed #49 + #47 on branch `issue-49-jq-map-context-naivebayes-expr` (061f693).
+Removed `JqMapAdapter` workaround — platform `JQExpressionEngine` now handles
+Map context natively. Added `JqResultUnwrapper` for scalar result types.
+Added `GanglionDescriptor` sealed interface in `api/` with `NaiveBayes` variant.
+`SituationDefinitionProvider.ganglionDescriptors()` default method. YAML `ganglia:`
+section in `ras-situations.yaml` with per-feature expression extraction.
+`ExpressionFeatureExtractor` implements `NaiveBayesFeatureExtractor`. Three-phase
+registry constructor. Design review ($12.47, 3 rounds, 13 issues). Platform
+prereqs completed externally: `StringExpressionEvaluator` (48d82d6) and JQ Map
+context fix (f66bba4). Platform issue filed: casehubio/platform#190 (JQ resultType).
 
 ## Key decisions
 
-- Expression descriptors on `SituationDefinition` (not `SituationRegistration`) — consistent with existing operational config pattern
-- Registry compiles (not YAML provider) — centralised, works for all registration paths
-- `CaseTriggerConfig` unchanged — `dynamicCaseData` moved to `SituationDefinition`
-- JqMapAdapter in RAS (not platform engine fix) — bridges Map→JsonNode locally; #49 filed for native platform fix
-- Merge order: static baseCaseData → dynamic expressions → correlation metadata → CaseInputContributors
+- GanglionDescriptor as sealed interface with type discriminator — extensible for expression-rules ganglion
+- Per-feature expressions co-located with likelihood tables in YAML (not separate sections)
+- Nullable MeterRegistry in ExpressionFeatureExtractor (avoids circular CDI dependency with RasMetrics)
+- JqResultUnwrapper is an acknowledged workaround — platform#190 filed for native fix
 
 ## What's next
 
 | # | Description | Scale | Complexity | Notes |
 |---|-------------|-------|------------|-------|
-| #47 | NaiveBayes feature extraction via expressions | M | Med | Needs YAML ganglion config |
+| #50 | Expression-rule ganglion (type: expression-rules) | M | Med | Discussed during brainstorming, deferred |
 | #48 | Evidence extraction templates | M | Med | Ganglion-level convenience |
-| #49 | JQ engine native Map context support | S | Low | Removes JqMapAdapter workaround |
 | #40 | RAS feedback loop | L | High | Case outcomes into detection tuning; refs parent#365 |
 | #41 | Meta-situations | L | High | Situations observing other situations |
 | #42 | Situation templates | M | Med | Reusable parameterised definitions |
