@@ -1,0 +1,9 @@
+branch: issue-42-situation-templates
+project-sha: 39a7ebf0ceea555ab3d649d3dc8de84664989e38
+date: 2026-07-25
+issue: 42
+issue-repo: casehubio/casehub-ras
+covers: 42
+flyway-next-v: none
+design-repo: project
+design-section-hashes: 
