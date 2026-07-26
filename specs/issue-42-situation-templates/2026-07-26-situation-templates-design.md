@@ -124,6 +124,11 @@ situations:
       cooldown: PT5M
 ```
 
+Overriding `chainMode` on a ganglion-bundling template may orphan the bundled ganglia
+if the new chain mode references different ganglion IDs. The orphaned ganglia are
+constructed by the registry but never referenced by any situation. This is harmless
+but suggests the template may not be the right fit for the consumer's needs.
+
 ## Parameter System
 
 ### Declaration
@@ -152,14 +157,16 @@ Recursive tree walk of the template definition Map:
 2. If value is a String containing `${paramName}` as a **substring**
    (e.g., `"prefix-${id}-suffix"`): string interpolation, result is always a String.
 3. If value is a List: recurse into each element.
-4. If value is a Map: recurse into each value.
+4. If value is a Map: recurse into each value. Map keys are not substituted.
 5. Otherwise: leave as-is.
 
 The distinction between whole-value substitution and substring interpolation is how
 typed values flow through without coercion.
 
 After substitution, any remaining `${...}` placeholder in the resolved tree is an
-error — catches typos in template definitions.
+error — catches typos in template definitions. This check scans both Map values and
+Map keys: a `${param}` placeholder in a key position is always an error (key
+substitution is not supported).
 
 ### Validation
 
@@ -190,6 +197,11 @@ When `YamlSituationDefinitionProvider` encounters a situation with `fromTemplate
    Identical code path to hand-written definitions from this point. Any
    exception from `parseSituation()` is wrapped with template context (see
    §Error Wrapping).
+
+Template definitions cannot reference other templates. `fromTemplate:` is only valid
+in the `situations:` section. A `fromTemplate` key in a template's `definition:` is
+not processed — it passes through to `parseSituation()` as an unknown key and is
+ignored, likely producing a missing `chainMode` error.
 
 ### Error Wrapping
 
@@ -259,7 +271,7 @@ Bundled ganglia are resolved **per-instantiation**, not per-template-definition.
 `fromTemplate:` situation that references a template with `ganglia:` produces its own
 resolved ganglia. Two instantiations of the same template with different `ganglionId`
 parameters produce two different ganglia. Resolution happens during situation parsing
-(step 3 of the loading flow), not during template registration.
+(step 5 of the loading flow), not during template registration.
 
 The resolved ganglia are added to the provider's `ganglionDescriptors()` return list
 alongside explicitly declared ganglia from the top-level `ganglia:` section. The
@@ -460,6 +472,22 @@ All tests in `YamlSituationDefinitionProviderTest`.
 - Template with `ganglia:` → ganglion descriptors in `ganglionDescriptors()`.
 - Bundled ganglion ID collision → registry catches duplicate.
 - Template without `ganglia:` → no ganglion descriptors emitted.
+
+**Identity field injection:**
+- Identity field `eventTypes` auto-satisfies a `required: true` template parameter.
+- Explicit consumer parameter overrides identity field value.
+- Parameter with no matching identity field is unaffected.
+
+**Two-file loading:**
+- Built-in templates loaded before consumer templates.
+- Consumer template with same ID replaces built-in entirely.
+- Missing built-in resource → empty template registry (not an error).
+- Consumer YAML with `templates:` + `ganglia:` + `situations:` all present.
+
+**Error wrapping:**
+- `parseSituation()` exception wrapped with template ID and situation ID.
+- Substitution-phase error (unresolved placeholder) includes template context.
+- `${param}` in a Map key position → error (key substitution not supported).
 
 **End-to-end:**
 - Template-instantiated situation registered in `SituationDefinitionRegistry`.
