@@ -12,11 +12,15 @@ app with minor variations. This increases adoption cost and introduces inconsist
 each app makes slightly different chain mode choices for the same conceptual pattern.
 
 Evidence from the codebase:
-- `DesiredStateSituationDefinitionProvider` builds 3 programmatic definitions with
-  near-identical structure, differing only in event types, ganglion IDs, chain mode
-  params, and trigger config.
-- `JpaRuntimeSituationDefinitionProvider` in iot duplicated the entire YAML parser
-  from `YamlSituationDefinitionProvider` to get multi-resource loading + JPA overlay.
+- `JpaRuntimeSituationDefinitionProvider` in iot duplicated the YAML parser from
+  `YamlSituationDefinitionProvider` with schema divergences (`triggerConfig` vs
+  `triggerAction`, legacy `requiredGanglia` field name, missing `streak`/`rate`
+  chain modes). Templates don't solve this parser duplication — that requires
+  extracting shared parsing logic independently (see casehubio/casehub-ras#55).
+- The issue's own pattern list (SLA breach, anomaly spike, heartbeat missing,
+  compliance drift, threshold crossing) represents real adoption friction: each
+  consuming app currently hand-assembles the same chain mode configurations with
+  minor variations in thresholds, ganglion IDs, and trigger config.
 
 ## Approach
 
@@ -78,10 +82,24 @@ situations:
       caseName: replan
 ```
 
+### Valid Template Fields
+
+All fields supported by `parseSituation()` are valid in a template's `definition:`
+section: `chainMode`, `correlationWindow`, `eventBufferDelay`, `triggerAction`
+(including `baseCaseData`), `triggerMode`, `eventFilter`, `correlationKey`, and
+`dynamicCaseData`. Any of these may contain `${param}` placeholders. The built-in
+templates use a subset; consumers may use any combination.
+
 ### Identity Fields
 
 `situationId` and `eventTypes` are always consumer-provided. They are never part of
 the template definition — they are what make each instance unique.
+
+Identity fields are implicitly available as parameter values during substitution: if
+a template declares a parameter with the same name as an identity field (e.g.,
+`eventTypes`), and the consumer does not provide it explicitly in `parameters:`, the
+identity field's value is used. This eliminates forced duplication when a template's
+bundled ganglia need `handledEventTypes` to match the situation's `eventTypes`.
 
 ### Consumer Overrides
 
@@ -156,22 +174,48 @@ When `YamlSituationDefinitionProvider` encounters a situation with `fromTemplate
 
 1. **Look up template.** Find by `id` in the parsed templates map.
    `IllegalArgumentException` if not found.
-2. **Build parameter values.** Start with template defaults, overlay with consumer's
+2. **Build parameter values.** Start with template defaults, then inject identity
+   fields (`situationId`, `eventTypes`) as parameter values for any declared
+   template parameter with a matching name (identity fields override defaults
+   but not explicit consumer parameters), then overlay with consumer's
    `parameters:` map. Validate required params are present.
-3. **Deep-copy and substitute.** Deep-copy the template's `definition:` Map tree.
-   Walk the copy, replacing `${param}` placeholders with resolved values.
+3. **Deep-copy and substitute.** Deep-copy the template's `definition:` Map tree
+   (and `ganglia:` section if present). Walk the copy, replacing `${param}`
+   placeholders with resolved values.
 4. **Merge consumer overrides.** Any field the consumer provides alongside
    `fromTemplate:` (other than `fromTemplate`, `situationId`, `eventTypes`,
    `parameters`) is deep-merged into the resolved Map. Consumer fields win.
 5. **Inject identity.** Set `situationId` and `eventTypes` from consumer values.
 6. **Parse.** Pass the fully resolved Map to the existing `parseSituation()`.
-   Identical code path to hand-written definitions from this point.
+   Identical code path to hand-written definitions from this point. Any
+   exception from `parseSituation()` is wrapped with template context (see
+   §Error Wrapping).
+
+### Error Wrapping
+
+When `parseSituation()` throws after template resolution, the error is wrapped with
+template context: template ID, situation ID, and which phase failed (substitution,
+merge, or parsing). Example:
+
+```
+Error resolving template 'streak-breach' for situation 'my-sit':
+  chainMode required for situation 'my-sit'
+```
+
+This distinguishes errors caused by template definition problems from consumer
+override problems.
 
 ### Deep Merge Semantics
 
 - Maps: recursive merge, consumer values win on key conflict.
 - Lists: consumer replaces entirely (lists like `ganglia: [a, b]` are atomic).
 - Scalars: consumer replaces.
+
+When a consumer overrides a type-discriminated map (e.g., `triggerAction`) with a
+different `type`, deep merge may leave fields from the original type variant in the
+resolved map. This is safe: `parseTriggerAction` and `parseChainMode` read only the
+fields required for the resolved type and ignore unknown keys. Parsers must not
+validate that no extra keys are present.
 
 ## Ganglion Bundling
 
@@ -211,10 +255,16 @@ templates:
         caseVersion: "1"
 ```
 
-When a situation references a template with bundled ganglia, the resolved ganglia are
-added to the provider's `ganglionDescriptors()` return list. The existing registry
-Phase 1 handles construction. Duplicate ganglion ID collision is caught by the
-registry's existing check.
+Bundled ganglia are resolved **per-instantiation**, not per-template-definition. Each
+`fromTemplate:` situation that references a template with `ganglia:` produces its own
+resolved ganglia. Two instantiations of the same template with different `ganglionId`
+parameters produce two different ganglia. Resolution happens during situation parsing
+(step 3 of the loading flow), not during template registration.
+
+The resolved ganglia are added to the provider's `ganglionDescriptors()` return list
+alongside explicitly declared ganglia from the top-level `ganglia:` section. The
+existing registry Phase 1 handles construction. Duplicate ganglion ID collision is
+caught by the registry's existing check.
 
 The `ganglia:` section is optional. Templates without it are situation-only patterns —
 the consumer must ensure referenced ganglia exist elsewhere.
@@ -231,18 +281,109 @@ Loaded automatically before the consumer's resource.
 **Loading order:**
 1. Built-in templates from `META-INF/ras-situation-templates.yaml`.
 2. Consumer templates from consumer's YAML.
-3. Consumer templates with the same `id` override built-in ones.
+3. A consumer template with the same `id` as a built-in **replaces it entirely**.
+   To modify a single default, copy the full template definition.
 
 **Initial templates:**
 
-| Template ID | Chain Mode | Parameters (required) | Parameters (defaulted) |
-|---|---|---|---|
-| `streak-breach` | Streak | ganglionId, caseNamespace, caseName | requiredCount=3, window=PT10M, caseVersion="1" |
-| `threshold-crossing` | Threshold | ganglia, caseNamespace, caseName | minConfidence=0.8, window=PT5M, caseVersion="1" |
-| `count-accumulation` | Count | ganglionId, caseNamespace, caseName | requiredCount=5, window=PT10M, caseVersion="1" |
-| `rate-breach` | Rate | ganglia, caseNamespace, caseName | minRate=0.6, windowSize=10, window=PT30M, caseVersion="1" |
-
 All default to `triggerMode: fire-once` and `triggerAction: create-case`.
+
+```yaml
+templates:
+  - id: streak-breach
+    description: "Triggers when same ganglion fires N times consecutively"
+    parameters:
+      ganglionId: {required: true}
+      requiredCount: {default: 3}
+      window: {default: PT10M}
+      caseNamespace: {required: true}
+      caseName: {required: true}
+      caseVersion: {default: "1"}
+    definition:
+      chainMode:
+        type: streak
+        ganglionId: ${ganglionId}
+        requiredCount: ${requiredCount}
+      correlationWindow: ${window}
+      triggerAction:
+        type: create-case
+        caseNamespace: ${caseNamespace}
+        caseName: ${caseName}
+        caseVersion: ${caseVersion}
+      triggerMode:
+        type: fire-once
+
+  - id: threshold-crossing
+    description: "Triggers when ganglion confidence exceeds threshold"
+    parameters:
+      ganglia: {required: true}
+      minConfidence: {default: 0.8}
+      window: {default: PT5M}
+      caseNamespace: {required: true}
+      caseName: {required: true}
+      caseVersion: {default: "1"}
+    definition:
+      chainMode:
+        type: threshold
+        ganglia: ${ganglia}
+        minConfidence: ${minConfidence}
+      correlationWindow: ${window}
+      triggerAction:
+        type: create-case
+        caseNamespace: ${caseNamespace}
+        caseName: ${caseName}
+        caseVersion: ${caseVersion}
+      triggerMode:
+        type: fire-once
+
+  - id: count-accumulation
+    description: "Triggers when ganglion fires N times in a window"
+    parameters:
+      ganglionId: {required: true}
+      requiredCount: {default: 5}
+      window: {default: PT10M}
+      caseNamespace: {required: true}
+      caseName: {required: true}
+      caseVersion: {default: "1"}
+    definition:
+      chainMode:
+        type: count
+        ganglionId: ${ganglionId}
+        requiredCount: ${requiredCount}
+      correlationWindow: ${window}
+      triggerAction:
+        type: create-case
+        caseNamespace: ${caseNamespace}
+        caseName: ${caseName}
+        caseVersion: ${caseVersion}
+      triggerMode:
+        type: fire-once
+
+  - id: rate-breach
+    description: "Triggers when ganglion fire rate exceeds threshold in sliding window"
+    parameters:
+      ganglia: {required: true}
+      minRate: {default: 0.6}
+      windowSize: {default: 10}
+      window: {default: PT30M}
+      caseNamespace: {required: true}
+      caseName: {required: true}
+      caseVersion: {default: "1"}
+    definition:
+      chainMode:
+        type: rate
+        ganglia: ${ganglia}
+        minRate: ${minRate}
+        windowSize: ${windowSize}
+      correlationWindow: ${window}
+      triggerAction:
+        type: create-case
+        caseNamespace: ${caseNamespace}
+        caseName: ${caseName}
+        caseVersion: ${caseVersion}
+      triggerMode:
+        type: fire-once
+```
 
 **Versioning:** Templates are classpath resources versioned by the Maven artifact
 version. Adding optional parameters with defaults is backward-compatible. Removing or
@@ -258,8 +399,28 @@ renaming parameters is a breaking change.
 
 | File | Change |
 |---|---|
-| `YamlSituationDefinitionProvider` | Add `parseTemplates()`, template resolution, parameter substitution. Load built-in templates resource. Parse order: built-in templates → consumer templates → ganglia → situations. |
+| `YamlSituationDefinitionProvider` | Add `parseTemplates()`, template resolution, parameter substitution. Two-file loading (see below). |
 | `META-INF/ras-situation-templates.yaml` | New — the built-in template library (4 templates). |
+
+### Two-File Loading Flow
+
+The constructor changes from loading a single resource to loading two:
+
+1. **Load built-in templates.** `Thread.currentThread().getContextClassLoader()
+   .getResourceAsStream("META-INF/ras-situation-templates.yaml")`. Hardcoded path,
+   not configurable. If absent (e.g., test classpath), the template registry starts
+   empty — this is not an error.
+2. **Load consumer resource.** From `ras.situations.yaml` config property (existing
+   behavior). The consumer file may contain `templates:`, `ganglia:`, and
+   `situations:` sections.
+3. **Merge templates.** Templates from step 1 populate a `Map<String, SituationTemplate>`
+   by ID. Templates from step 2's `templates:` section are added to the same map —
+   a consumer template with the same ID as a built-in replaces it entirely.
+4. **Parse ganglia.** Consumer's `ganglia:` section parsed (existing behavior).
+5. **Parse situations.** Consumer's `situations:` section parsed. Entries with
+   `fromTemplate:` are resolved against the merged template map. Bundled ganglia
+   from template instantiations are accumulated and added to the provider's
+   `ganglionDescriptors()` return list alongside explicitly declared ganglia.
 
 **Internal types** (package-private):
 
