@@ -1,5 +1,5 @@
-# Branch Closed: issue-36-naivebayes-persistence
+# Branch Closed: issue-42-situation-templates
 
-**Date:** 2026-07-14
-**Issues:** 36
+**Date:** 2026-07-27
+**Issues:** 42
 **Status:** merged to main
