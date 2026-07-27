@@ -14,6 +14,11 @@ loading with 4 built-in templates (`streak-breach`, `threshold-crossing`,
 ($13.28, 3 rounds, 17 issues). Zero API changes — templates are internal to the
 YAML provider.
 
+**Cross-repo cherry-pick (2026-07-27):** 5007cc3 — `RasTriggerPolicy` migrated to
+blocking, `findBySituationId()` added to `SituationDefinitionRegistry`. Cherry-picked
+from iot#78 work. Pushed to `upstream` (casehubio/casehub-ras) — note: this repo uses
+fork workflow (`origin` = mdproctor fork, `upstream` = org repo). CI deploys from upstream.
+
 ## Key decisions
 
 - Templates are a YAML parse concern — registry sees fully resolved registrations
