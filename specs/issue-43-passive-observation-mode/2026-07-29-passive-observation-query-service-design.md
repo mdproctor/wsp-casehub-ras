@@ -84,7 +84,18 @@ public record SituationEvent(
         int triggerCount,
         Map<String, Object> evidence,
         Map<String, Object> metadata
-) {}
+) {
+    public SituationEvent {
+        Objects.requireNonNull(situationId, "situationId");
+        Objects.requireNonNull(correlationKey, "correlationKey");
+        Objects.requireNonNull(tenancyId, "tenancyId");
+        Objects.requireNonNull(changeType, "changeType");
+        Objects.requireNonNull(eventTime, "eventTime");
+        Objects.requireNonNull(firstSeen, "firstSeen");
+        evidence = evidence != null ? Map.copyOf(evidence) : Map.of();
+        metadata = metadata != null ? Map.copyOf(metadata) : Map.of();
+    }
+}
 ```
 
 Confidence: max qualifying confidence from the detections at transition time (same
@@ -161,13 +172,16 @@ public interface SituationQueryService {
     TrendResult trend(String tenancyId, String situationId,
                       Duration window, Duration baseline, Instant asOf);
 
-    TenantHealth health(String tenancyId, Duration window);
+    TenantHealth health(String tenancyId, Duration window, Instant asOf);
 }
 ```
 
 Three `history()` overloads for progressive narrowing (tenant → situation → correlation
-key). No nullable parameters — consistent with `SituationStore.find()` style. Results
-are ordered chronologically (ascending `eventTime`). Contract test verifies ordering.
+key). `from` and `to` filter on `eventTime` — they select events whose lifecycle
+transition occurred within `[from, to)`. The `firstSeen` field is informational in the
+returned records; consumers use it for accumulation-duration analysis in application code.
+No nullable parameters — consistent with `SituationStore.find()` style. Results are
+ordered chronologically (ascending `eventTime`). Contract test verifies ordering.
 
 `triggerCount()` filters to `TRIGGERED` change type specifically.
 
@@ -179,7 +193,9 @@ Duration.ofDays(7), Instant.now())` compares the last 24h rate against the 7-day
 ending 24h ago. The `asOf` parameter enables reproducible queries and deterministic
 contract tests. Dashboard callers pass `Instant.now()`.
 
-`health()` returns per-situation aggregate summaries within a single window. No trend
+`health()` returns per-situation aggregate summaries within a single window anchored at
+`asOf`: the window is `[asOf - window, asOf)`. Same reproducibility rationale as `trend()`
+— dashboard callers pass `Instant.now()`, contract tests pin a fixed instant. No trend
 computation (that's a per-situation follow-up call via `trend()`).
 
 ### Supporting Types (api/)
@@ -305,13 +321,16 @@ No separate scheduled job — the expiry job already handles all RAS housekeepin
 ## Known Limitations
 
 **Time-range queries for still-accumulating situations.** The event log captures terminal
-transitions only. A `history(tenancyId, T1, T2)` query finds situations that had a
-lifecycle event in that range. With `firstSeen`, this includes situations whose
-accumulation window overlapped [T1, T2] — provided they eventually terminated and produced
-an event record. Situations still accumulating at query time are not in the event log;
-they remain visible via `SituationSource.activeSituations()`. Capturing inception events
-(the first `CONTINUE_ACCUMULATING`) would close this gap but requires changes to
-`SituationEvaluator`, which is out of scope for this spec.
+transitions only. `history()` filters on `eventTime` — it returns events whose lifecycle
+transition occurred within the requested range. A situation that started at T0,
+accumulated through [T1, T2], and triggered at T3 > T2 will not appear in
+`history(tenancyId, T1, T2)` because its event is at T3. The `firstSeen` field in each
+returned `SituationEvent` record enables consumers to compute accumulation duration and
+perform active-range analysis in application code, but does not change what `history()`
+returns. Situations still accumulating at query time have no event record; they remain
+visible via `SituationSource.activeSituations()`. Capturing inception events (the first
+`CONTINUE_ACCUMULATING`) would close the gap for still-accumulating situations but
+requires changes to `SituationEvaluator`, which is out of scope for this spec.
 
 **DISMISSED change type.** `SituationChangeEvent.ChangeType.DISMISSED` exists in the enum
 but is not currently fired by `SituationEvaluator`. It is reserved for a future dismiss
