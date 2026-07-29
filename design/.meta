@@ -1,0 +1,9 @@
+branch: issue-43-passive-observation-mode
+project-sha: 5007cc338088110e5e02cb0ecac7393b50ab8aaf
+date: 2026-07-29
+issue: 43
+issue-repo: casehubio/casehub-ras
+covers: 43
+flyway-next-v: unknown
+design-repo: project
+design-section-hashes: 
