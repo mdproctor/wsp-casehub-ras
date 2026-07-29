@@ -185,7 +185,8 @@ ordered chronologically (ascending `eventTime`). Contract test verifies ordering
 
 `triggerCount()` filters to `TRIGGERED` change type specifically.
 
-`trend()` compares event rates between two non-overlapping periods anchored at `asOf`:
+`trend()` counts TRIGGERED events only — same filter as `triggerCount()` — and compares
+trigger rates between two non-overlapping periods anchored at `asOf`:
 the **window** is `[asOf - window, asOf)` and the **baseline** is
 `[asOf - window - baseline, asOf - window)`. These periods are disjoint — the baseline
 ends where the window begins. Example: `trend("t1", "s1", Duration.ofDays(1),
@@ -271,8 +272,8 @@ public record SituationSummary(
 | Addition | Purpose |
 |----------|---------|
 | (expiry job integration) | `Instance<SituationEventRetention>` in `SituationExpiryJob` |
-| `ras.event.recorded` counter | Tagged by `change_type`, via `RasMetrics` |
-| `ras.event.cleanup.removed` counter | Via `RasMetrics` |
+| `ras.event_log.recorded` counter | Tagged by `change_type`, via `RasMetrics` |
+| `ras.expiry.event_log_cleaned` counter | Via `RasMetrics` |
 
 No changes to `SituationEvaluator`, `DefaultSituationSource`, or detection path.
 
