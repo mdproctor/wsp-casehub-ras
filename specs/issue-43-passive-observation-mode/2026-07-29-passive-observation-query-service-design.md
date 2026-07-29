@@ -46,6 +46,7 @@ CREATE TABLE ras_situation_event (
     tenancy_id      VARCHAR(255) NOT NULL,
     change_type     VARCHAR(50) NOT NULL,
     event_time      TIMESTAMP WITH TIME ZONE NOT NULL,
+    first_seen      TIMESTAMP WITH TIME ZONE NOT NULL,
     confidence      DOUBLE PRECISION NOT NULL,
     detection_count INT NOT NULL,
     trigger_count   INT NOT NULL,
@@ -77,6 +78,7 @@ public record SituationEvent(
         String tenancyId,
         SituationChangeEvent.ChangeType changeType,
         Instant eventTime,
+        Instant firstSeen,
         double confidence,
         int detectionCount,
         int triggerCount,
@@ -87,7 +89,9 @@ public record SituationEvent(
 
 Confidence: max qualifying confidence from the detections at transition time (same
 logic as `DefaultSituationSource.toActiveSituation()`). Evidence: from the detection
-with max qualifying confidence.
+with max qualifying confidence. `firstSeen`: projected from `SituationContext.firstSignal()`
+— the time the first detection arrived for this situation instance. Enables accumulation
+duration computation (`eventTime - firstSeen`) and active-range queries.
 
 ## Event Capture
 
@@ -100,18 +104,29 @@ CDI observer on `SituationChangeEvent`. Zero changes to `SituationEvaluator`.
 public class SituationEventRecorder {
     @Inject EntityManager em;
 
+    @Transactional
     void onSituationChange(@ObservesAsync SituationChangeEvent event) {
-        SituationEventEntity entity = project(event);
-        em.persist(entity);
+        try {
+            SituationEventEntity entity = project(event);
+            em.persist(entity);
+        } catch (Exception e) {
+            LOG.warning("Failed to record situation event: " + e.getMessage());
+        }
     }
 }
 ```
 
 - **`@ObservesAsync`** — matches existing `changeEvent.fireAsync()` calls. Never blocks
   the detection hot path.
-- **Best-effort** — if the observer fails (DB down), detection/trigger processing is
-  unaffected. Event history capture is not transactional with the situation lifecycle.
-- **Own transaction** — Quarkus CDI async observers get a new request context.
+- **`@Transactional`** — required because Quarkus CDI async observers get a new request
+  context but do NOT automatically start a JTA transaction.
+- **Best-effort via try-catch** — the observer catches and logs all exceptions so it never
+  propagates failures to the `fireAsync()` `CompletionStage`. This is critical: for
+  `NotifyOnly` triggers, `SituationEvaluator.executeDecision()` calls
+  `fireAsync(...).toCompletableFuture().join()`, which propagates observer exceptions.
+  Without the catch, a DB failure in the recorder would fail and reset every NotifyOnly
+  trigger. The `CreateCase` path is fire-and-forget (no `.join()`), but the recorder must
+  be safe for both paths.
 - **Projection** — extracts confidence, evidence, detection count, trigger count from
   `SituationContext` in the event.
 
@@ -144,26 +159,28 @@ public interface SituationQueryService {
                       Instant from, Instant to);
 
     TrendResult trend(String tenancyId, String situationId,
-                      Duration window, Duration baseline);
+                      Duration window, Duration baseline, Instant asOf);
 
     TenantHealth health(String tenancyId, Duration window);
-
-    default int removeEventsBefore(Instant cutoff) { return 0; }
 }
 ```
 
 Three `history()` overloads for progressive narrowing (tenant → situation → correlation
-key). No nullable parameters — consistent with `SituationStore.find()` style.
+key). No nullable parameters — consistent with `SituationStore.find()` style. Results
+are ordered chronologically (ascending `eventTime`). Contract test verifies ordering.
 
 `triggerCount()` filters to `TRIGGERED` change type specifically.
 
-`trend()` normalizes counts by duration to compare rates. "10 triggers in 24h vs. 70 in
-7d" → STABLE (same daily rate).
+`trend()` compares event rates between two non-overlapping periods anchored at `asOf`:
+the **window** is `[asOf - window, asOf)` and the **baseline** is
+`[asOf - window - baseline, asOf - window)`. These periods are disjoint — the baseline
+ends where the window begins. Example: `trend("t1", "s1", Duration.ofDays(1),
+Duration.ofDays(7), Instant.now())` compares the last 24h rate against the 7-day rate
+ending 24h ago. The `asOf` parameter enables reproducible queries and deterministic
+contract tests. Dashboard callers pass `Instant.now()`.
 
 `health()` returns per-situation aggregate summaries within a single window. No trend
 computation (that's a per-situation follow-up call via `trend()`).
-
-`removeEventsBefore()` — default returns 0. JPA implementation does bulk DELETE.
 
 ### Supporting Types (api/)
 
@@ -181,8 +198,9 @@ Direction computed by implementation via rate normalization. Current rate =
 `currentCount / window.toMillis()`, baseline rate = `baselineCount / baseline.toMillis()`.
 Ratio = `currentRate / baselineRate`. RISING if ratio > 1.2, FALLING if ratio < 0.8,
 STABLE otherwise. These thresholds are hardcoded for the first cut — configurable
-thresholds are a follow-up if needed. `INSUFFICIENT_DATA` when baseline window has
-zero events.
+thresholds are a follow-up if needed. `INSUFFICIENT_DATA` when baseline period has
+zero events. Both `currentCount` and `baselineCount` in the result are raw counts from
+their respective non-overlapping periods (see `trend()` method documentation).
 
 ```java
 public record TenantHealth(
@@ -209,6 +227,7 @@ public record SituationSummary(
 |----------|---------|
 | `SituationQueryService` | SPI interface |
 | `SituationEvent` | Event log record |
+| `SituationEventRetention` | Retention cleanup interface |
 | `TrendResult` + `TrendDirection` | Trend query result |
 | `TenantHealth` + `SituationSummary` | Health query result |
 | `AbstractSituationQueryServiceContractTest` | Contract test in test-jar |
@@ -235,7 +254,7 @@ public record SituationSummary(
 
 | Addition | Purpose |
 |----------|---------|
-| (expiry job integration) | Calls `removeEventsBefore()` from `SituationExpiryJob` |
+| (expiry job integration) | `Instance<SituationEventRetention>` in `SituationExpiryJob` |
 | `ras.event.recorded` counter | Tagged by `change_type`, via `RasMetrics` |
 | `ras.event.cleanup.removed` counter | Via `RasMetrics` |
 
@@ -243,12 +262,29 @@ No changes to `SituationEvaluator`, `DefaultSituationSource`, or detection path.
 
 ## Retention and Cleanup
 
-Event log cleanup integrates with the existing `SituationExpiryJob`.
+Event log cleanup integrates with the existing `SituationExpiryJob` via a dedicated
+retention interface — cleanup does not live on the query SPI.
+
+### `SituationEventRetention` (api/)
+
+```java
+public interface SituationEventRetention {
+    int removeEventsBefore(Instant cutoff);
+}
+```
+
+The JPA implementation (`JpaSituationQueryService` or a separate bean) implements this
+with a bulk `DELETE FROM SituationEventEntity WHERE eventTime < :cutoff`. The in-memory
+implementation truncates its backing list.
+
+### Expiry job integration
 
 - Config: `ras.event-history.retention` (Duration, default `P30D`)
+- `SituationExpiryJob` injects `Instance<SituationEventRetention>` (optional dependency —
+  same pattern as existing `Instance<OrphanedResourceCleaner>`). If no implementation is
+  on the classpath, cleanup is skipped.
 - The expiry job computes `Instant.now().minus(retention)` and calls
-  `SituationQueryService.removeEventsBefore()`
-- JPA implementation: bulk `DELETE FROM SituationEventEntity WHERE eventTime < :cutoff`
+  `removeEventsBefore()` on any resolvable instance.
 
 No separate scheduled job — the expiry job already handles all RAS housekeeping.
 
@@ -266,6 +302,22 @@ No separate scheduled job — the expiry job already handles all RAS housekeepin
 - **Integration test**: end-to-end — CloudEvent → RasEngine → trigger → verify event log
   captured the transition correctly.
 
+## Known Limitations
+
+**Time-range queries for still-accumulating situations.** The event log captures terminal
+transitions only. A `history(tenancyId, T1, T2)` query finds situations that had a
+lifecycle event in that range. With `firstSeen`, this includes situations whose
+accumulation window overlapped [T1, T2] — provided they eventually terminated and produced
+an event record. Situations still accumulating at query time are not in the event log;
+they remain visible via `SituationSource.activeSituations()`. Capturing inception events
+(the first `CONTINUE_ACCUMULATING`) would close this gap but requires changes to
+`SituationEvaluator`, which is out of scope for this spec.
+
+**DISMISSED change type.** `SituationChangeEvent.ChangeType.DISMISSED` exists in the enum
+but is not currently fired by `SituationEvaluator`. It is reserved for a future dismiss
+API (e.g., external user/system dismissal of an accumulating situation). The event log
+and `change_type` column will capture DISMISSED events when that path is introduced.
+
 ## Not In Scope
 
 - REST endpoint for the query service — the SPI is the deliverable. Consuming apps inject
@@ -277,3 +329,6 @@ No separate scheduled job — the expiry job already handles all RAS housekeepin
 - Changes to `SituationSource` or `ActiveSituation` — unchanged for live state queries.
 - Pagination on `history()` — follows existing `activeSituations()` pattern. Consumers
   constrain via time range.
+- Inception event capture — tracking the start of accumulation in the event log would
+  enable full active-range queries for still-accumulating situations, but requires
+  changes to `SituationEvaluator` (out of scope).
