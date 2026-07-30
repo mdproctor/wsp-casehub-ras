@@ -1,31 +1,28 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-07-27
-**Issues:** #42 (closed)
+**Date:** 2026-07-30
+**Issues:** #43 (closed)
 
 ## What was done
 
-Closed #42 on branch `issue-42-situation-templates` (eb70de4). Added YAML template
-support to `YamlSituationDefinitionProvider`: `templates:` section with `${param}`
-placeholders, consumer `fromTemplate:` + `parameters:` instantiation, typed parameter
-substitution, deep merge overrides, identity field injection, error wrapping, two-file
-loading with 4 built-in templates (`streak-breach`, `threshold-crossing`,
-`count-accumulation`, `rate-breach`), and optional ganglion bundling. Design review
-($13.28, 3 rounds, 17 issues). Zero API changes — templates are internal to the
-YAML provider.
-
-**Cross-repo cherry-pick (2026-07-27):** 5007cc3 — `RasTriggerPolicy` migrated to
-blocking, `findBySituationId()` added to `SituationDefinitionRegistry`. Cherry-picked
-from iot#78 work. Pushed to `upstream` (casehubio/casehub-ras) — note: this repo uses
-fork workflow (`origin` = mdproctor fork, `upstream` = org repo). CI deploys from upstream.
+Closed #43 on branch `issue-43-passive-observation-mode` (cb00121). Added
+SituationQueryService SPI backed by an append-only `ras_situation_event` table
+capturing situation lifecycle transitions. Three history() overloads (tenant,
+situation, correlation key), triggerCount(), trend() with rate normalization,
+health() with per-tenant aggregation. SituationEventRetention SPI for TTL
+cleanup via SituationExpiryJob (configurable, default P30D). CDI @ObservesAsync
+recorder in persistence-jpa/ with @Transactional + try-catch for NotifyOnly
+trigger safety. InMemory and JPA implementations both passing 33 contract tests.
+Design review (4 rounds, 17 issues, $12.98). Garden entry GE-20260730-d54a8f
+(fireAsync().join() exception propagation gotcha).
 
 ## Key decisions
 
-- Templates are a YAML parse concern — registry sees fully resolved registrations
-- Whole-value `${param}` preserves types (int/double/list); substring interpolation produces strings
-- Identity fields (situationId, eventTypes) implicitly available as template parameters
-- Consumer templates override built-in with same ID (last-parsed wins)
-- Ganglion bundling resolved per-instantiation, not per-template-definition
+- SituationSource stays for live state; new SPI for historical (separate data sources)
+- Terminal transitions only — no inception events (SituationEvaluator unchanged)
+- SituationEventRetention separate from SituationQueryService (design review R1-04)
+- firstSeen column enables accumulation duration computation (design review R1-03)
+- TrendResult.compute() static factory shared across implementations (avoids cross-module dep)
 
 ## What's next
 
@@ -33,7 +30,6 @@ fork workflow (`origin` = mdproctor fork, `upstream` = org repo). CI deploys fro
 |---|-------------|-------|------------|-------|
 | #40 | RAS feedback loop | L | High | Case outcomes into detection tuning; refs parent#365 |
 | #41 | Meta-situations | L | High | Situations observing other situations |
-| #43 | Passive observation mode | M | Med | Richer query API |
 | #44 | Situation replay | M | Med | Validate definitions against historical events |
 | #45 | Adaptive thresholds | L | High | Self-tuning; depends on #40 |
 | #29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
