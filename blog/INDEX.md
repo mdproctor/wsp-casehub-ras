@@ -3,3 +3,4 @@
 | [2026-07-14-mdp01-third-kind-of-ganglion-state.md](2026-07-14-mdp01-third-kind-of-ganglion-state.md) | 2026-07-14 | GanglionStateStore SPI — pluggable persistence for simple-state ganglia like NaiveBayes |
 | [2026-07-22-mdp01-per-decision-path-evidence.md](2026-07-22-mdp01-per-decision-path-evidence.md) | 2026-07-22 | Per-decision-path evidence templates — why per-signal is too coarse, per-rule and per-outcome as the right abstraction |
 | [2026-07-24-mdp01-retiring-reactive-costume.md](2026-07-24-mdp01-retiring-reactive-costume.md) | 2026-07-24 | Retiring Mutiny from RAS — 21 methods across 7 SPIs converted from Uni to blocking, zero genuine reactive composition found |
+| [2026-07-30-mdp01-ras-learns-to-remember.md](2026-07-30-mdp01-ras-learns-to-remember.md) | 2026-07-30 | SituationQueryService — append-only event log for historical, frequency, trending, and per-tenant health queries |
