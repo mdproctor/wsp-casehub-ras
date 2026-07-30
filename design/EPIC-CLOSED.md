@@ -1,5 +1,5 @@
-# Branch Closed: issue-36-naivebayes-persistence
+# Branch Closed: issue-43-passive-observation-mode
 
-**Date:** 2026-07-14
-**Issues:** 36
+**Date:** 2026-07-30
+**Issues:** 43
 **Status:** merged to main
