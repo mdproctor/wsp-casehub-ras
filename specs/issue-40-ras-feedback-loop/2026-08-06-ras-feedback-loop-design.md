@@ -62,7 +62,8 @@ record FeedbackConfig(
 ```
 
 Validation: `noiseLabels` and `confirmedLabels` must be disjoint. Cooldown > 0.
-learningRate in (0.0, 1.0]. retentionPeriod > 0.
+learningRate in (0.0, 1.0]. retentionPeriod > 0. retentionPeriod >= suppressionCooldown
+(otherwise cleanup destroys records needed for active suppression checks).
 
 ### OutcomeClassification
 
@@ -136,19 +137,23 @@ interface OutcomeLedger {
     OutcomeStatistics statistics(String situationId, String tenancyId, Instant since);
     Optional<Instant> lastNoiseDismissalTime(
         String situationId, String correlationKey, String tenancyId);
-    int removeRecordsBefore(Instant cutoff);
+    Set<String> distinctTenancies(String situationId);
+    int removeRecordsBefore(String situationId, Instant cutoff);
 }
 ```
 
 `statistics()` is on the SPI so JPA pushes aggregation to SQL.
 `lastNoiseDismissalTime()` is a dedicated query for fast suppression checks.
+`distinctTenancies()` returns `SELECT DISTINCT tenancy_id WHERE situation_id = ?` —
+used by `FeedbackUpdateJob` to discover the tenant iteration scope.
+`removeRecordsBefore()` is per-situation so retention periods are honoured individually.
 
 ### FeedbackStrategy (SPI)
 
 ```java
 interface FeedbackStrategy {
     boolean shouldSuppress(String situationId, String correlationKey, String tenancyId,
-                           FeedbackConfig config, OutcomeLedger ledger);
+                           FeedbackConfig config, Optional<Instant> lastNoiseDismissal);
 
     OptionalDouble adjustThreshold(FeedbackReport report, double currentThreshold,
                                     FeedbackConfig config);
@@ -180,15 +185,20 @@ class OutcomeRecorder implements CaseOutcomeObserver {
 
         OutcomeClassification classification = config.classify(event.outcomeLabel());
 
-        ledger.record(new OutcomeRecord(
-            situationId,
-            (String) event.caseFileSnapshot().get("correlationKey"),
-            event.tenancyId(),
-            event.outcomeLabel(),
-            classification,
-            event.closedAt(),
-            event.caseId()
-        ));
+        try {
+            ledger.record(new OutcomeRecord(
+                situationId,
+                (String) event.caseFileSnapshot().get("correlationKey"),
+                event.tenancyId(),
+                event.outcomeLabel(),
+                classification,
+                event.closedAt(),
+                event.caseId()
+            ));
+        } catch (Exception e) {
+            LOG.warning("Failed to record outcome for situation '"
+                + situationId + "': " + e.getMessage());
+        }
     }
 }
 ```
@@ -265,7 +275,7 @@ if (feedback != null && feedbackStrategy.shouldSuppress(
 `Instance<OutcomeLedger>` constructor dependencies. Optional -- absent means
 no suppression. Evaluator already handles SUPPRESS: fires
 `SituationChangeEvent.ChangeType.SUPPRESSED`, removes situation, increments
-`ras.situation.suppressed` metric.
+`ras.engine.situations.suppressed` metric.
 
 ### 2. Detection Quality Metrics -- FeedbackMetrics
 
@@ -279,35 +289,70 @@ Micrometer gauges, optional via `Instance<MeterRegistry>`:
 
 Updated periodically by FeedbackUpdateJob.
 
+**Recall is deferred.** Recall requires a false-negative signal — situations that
+should have been detected but weren't — which RAS cannot compute from its own outcome
+data. Deferred to #58. `DriftDirection.UNDER_SENSITIVE` is reserved in the enum for
+future external signal but never produced by the default analyzer.
+
 ### 3. Threshold Drift -- SituationDefinitionRegistry overlay
 
-`SituationDefinitionRegistry` gains an `effectiveThreshold` overlay:
+`SituationDefinitionRegistry` gains an `effectiveThreshold` overlay keyed by
+`(situationId, tenancyId)`:
 
 ```java
-private final ConcurrentHashMap<String, Double> thresholdOverrides = new ConcurrentHashMap<>();
+private record ThresholdKey(String situationId, String tenancyId) {}
+private final ConcurrentHashMap<ThresholdKey, Double> thresholdOverrides = new ConcurrentHashMap<>();
 
-void applyThresholdOverride(String situationId, double adjustedThreshold) { ... }
-Optional<Double> effectiveThreshold(String situationId) { ... }
+void applyThresholdOverride(String situationId, String tenancyId, double adjustedThreshold) { ... }
+Optional<Double> effectiveThreshold(String situationId, String tenancyId) { ... }
 ```
 
-`DefaultRasTriggerPolicy.evaluateThreshold()` checks the registry for an override
-before using the definition's `minConfidence`. Original definition is never mutated.
-Overrides recomputed from `OutcomeStatistics` on restart by FeedbackUpdateJob.
+**Scope:** threshold drift applies only to `ChainMode.Threshold` in this iteration.
+`ChainMode.Rate.minRate` is a structurally analogous tunable but is deferred to #57.
+
+**Resolution:** `SituationEvaluator` resolves the effective threshold before passing
+the definition to the trigger policy. When an override exists, the evaluator constructs
+a new `SituationDefinition` with a modified `ChainMode.Threshold(ganglia, effectiveMinConfidence)`
+and passes that to `triggerPolicy.evaluate()`. The policy interface is unchanged — it
+sees a definition with the correct threshold already applied. Original definition is
+never mutated. Overrides recomputed from `OutcomeStatistics` on restart by FeedbackUpdateJob.
 
 ### 4. NaiveBayes Prior Updating
 
-`NaiveBayesGanglion` gains a `volatile double[] feedbackAdjustedPriors` field +
-`updatePriors(double[])` method. In `detect()`, new situation instances initialize
-from adjusted priors (if present) instead of config priors:
+`NaiveBayesGanglion` gains a `volatile double[] feedbackAdjustedLogPriors` field +
+`updatePriors(double[])` method. `updatePriors()` accepts raw probabilities (as
+produced by `FeedbackStrategy.adjustPriors()`) and converts to log space before
+storing — `NaiveBayesGanglion` operates entirely in log space internally:
+
+```java
+void updatePriors(double[] rawPriors) {
+    this.feedbackAdjustedLogPriors = Arrays.stream(rawPriors).map(Math::log).toArray();
+}
+```
+
+In `detect()`, new situation instances initialize from adjusted log priors (if
+present) instead of config log priors:
 
 ```java
 GanglionState loaded = stateStore.load(key)
     .orElseGet(() -> {
-        double[] priors = feedbackAdjustedPriors != null
-            ? feedbackAdjustedPriors
+        double[] priors = feedbackAdjustedLogPriors != null
+            ? Arrays.copyOf(feedbackAdjustedLogPriors, feedbackAdjustedLogPriors.length)
             : Arrays.copyOf(logPriors, logPriors.length);
         return new GanglionState(priors, OptionalLong.empty());
     });
+```
+
+`SituationDefinitionRegistry` gains a `rawGanglion(String ganglionId)` method that
+returns the unwrapped ganglion (before `EvidenceExtractingGanglion` decoration).
+`FeedbackUpdateJob` uses this to reach the concrete `NaiveBayesGanglion` via
+`instanceof` without fighting the decorator layer:
+
+```java
+Ganglion raw = registry.rawGanglion(ganglionId);
+if (raw instanceof NaiveBayesGanglion nbg) {
+    nbg.updatePriors(adjustedPriors);
+}
 ```
 
 `GanglionDescriptor.NaiveBayes` gains optional `outcomeGroundTruth: Map<String, String>`
@@ -317,7 +362,7 @@ this to convert OutcomeStatistics into empirical frequencies.
 YAML:
 ```yaml
 ganglia:
-  - id: fraud-classifier
+  - ganglionId: fraud-classifier
     type: naive-bayes
     outcomeGroundTruth:
       escalated: fraud
@@ -331,14 +376,28 @@ Scheduled job, same pattern as SituationExpiryJob:
 ```java
 @Scheduled(every = "${ras.feedback.update-interval:PT5M}")
 void update() {
-    // For each situation with feedbackConfig:
-    // 1. FeedbackAnalyzer.analyze() -> FeedbackReport
-    // 2. FeedbackStrategy.adjustThreshold() -> apply override to registry
-    // 3. FeedbackStrategy.adjustPriors() -> update NaiveBayesGanglion priors
-    // 4. FeedbackMetrics.update() -> refresh gauges
-    // 5. OutcomeLedger.removeRecordsBefore() -> cleanup expired records
+    for (String situationId : registry.allSituationIds()) {
+        SituationRegistration reg = registry.findBySituationId(situationId).orElse(null);
+        if (reg == null) continue;
+        FeedbackConfig config = reg.definition().feedbackConfig();
+        if (config == null) continue;
+
+        for (String tenancyId : ledger.distinctTenancies(situationId)) {
+            // 1. FeedbackAnalyzer.analyze() -> FeedbackReport
+            // 2. FeedbackStrategy.adjustThreshold() -> apply override to registry
+            // 3. FeedbackStrategy.adjustPriors() -> update NaiveBayesGanglion via rawGanglion()
+            // 4. FeedbackMetrics.update() -> refresh gauges
+        }
+
+        // 5. OutcomeLedger.removeRecordsBefore() -> per-situation cleanup
+        ledger.removeRecordsBefore(situationId,
+            Instant.now().minus(config.retentionPeriod()));
+    }
 }
 ```
+
+`SituationDefinitionRegistry.allSituationIds()` exposes the existing
+`RegistrySnapshot.situationIds()` set via a new public method.
 
 Suppression is NOT in the job -- checked in real-time by the trigger policy.
 
@@ -365,7 +424,8 @@ CREATE TABLE ras_outcome_record (
     outcome_label   VARCHAR(255) NOT NULL,
     classification  VARCHAR(20)  NOT NULL,
     closed_at       TIMESTAMP    NOT NULL,
-    case_id         UUID         NOT NULL
+    case_id         UUID         NOT NULL,
+    CONSTRAINT uq_outcome_case_id UNIQUE (case_id)
 );
 
 CREATE INDEX idx_outcome_situation_tenant
@@ -379,6 +439,9 @@ CREATE INDEX idx_outcome_suppression
 `idx_outcome_suppression` is composite with `classification` so the
 `lastNoiseDismissalTime()` query filters NOISE in the index scan.
 
+`JpaOutcomeLedger.record()` uses `INSERT ... ON CONFLICT (case_id) DO NOTHING` for
+idempotent writes — at-least-once delivery of case outcome events is expected.
+
 ### InMemoryOutcomeLedger
 
 `ConcurrentHashMap<String, List<OutcomeRecord>>` keyed by
@@ -390,11 +453,11 @@ CREATE INDEX idx_outcome_suppression
 |------|--------|
 | `SituationDefinition` | New `@Nullable FeedbackConfig feedbackConfig` field. New 11-arg constructor. Existing constructors default to null. |
 | `DefaultRasTriggerPolicy` | Constructor gains `Instance<FeedbackStrategy>` + `Instance<OutcomeLedger>`. Optional. |
-| `NaiveBayesGanglion` | `volatile double[] feedbackAdjustedPriors` + `updatePriors()`. |
+| `NaiveBayesGanglion` | `volatile double[] feedbackAdjustedLogPriors` + `updatePriors(double[])` (accepts raw, converts to log). |
 | `NaiveBayesConfig` | `@Nullable Map<String, String> outcomeGroundTruth`. |
 | `GanglionDescriptor.NaiveBayes` | `outcomeGroundTruth` field. |
-| `SituationDefinitionRegistry` | `thresholdOverrides` + `effectiveThreshold()` + `feedbackConfig()`. |
-| `SituationExpiryJob` | Calls `OutcomeLedger.removeRecordsBefore()` via `Instance<OutcomeLedger>`. |
+| `SituationDefinitionRegistry` | `thresholdOverrides` (keyed by `(situationId, tenancyId)`) + `effectiveThreshold()` + `feedbackConfig()` + `allSituationIds()` + `rawGanglion()`. |
+| `SituationEvaluator` | Resolves effective threshold from registry before calling `triggerPolicy.evaluate()`. |
 | `YamlSituationDefinitionProvider` | Parses `feedback:` + `outcomeGroundTruth:`. |
 
 ## YAML Schema
@@ -420,7 +483,7 @@ situations:
       retentionPeriod: P90D
 
 ganglia:
-  - id: fraud-classifier
+  - ganglionId: fraud-classifier
     type: naive-bayes
     outcomes: [fraud, legitimate]
     priors: [0.1, 0.9]
