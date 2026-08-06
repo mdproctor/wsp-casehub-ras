@@ -183,12 +183,15 @@ class OutcomeRecorder implements CaseOutcomeObserver {
         FeedbackConfig config = registry.feedbackConfig(situationId);
         if (config == null) return;
 
+        String correlationKey = (String) event.caseFileSnapshot().get("correlationKey");
+        if (correlationKey == null) return;
+
         OutcomeClassification classification = config.classify(event.outcomeLabel());
 
         try {
             ledger.record(new OutcomeRecord(
                 situationId,
-                (String) event.caseFileSnapshot().get("correlationKey"),
+                correlationKey,
                 event.tenancyId(),
                 event.outcomeLabel(),
                 classification,
@@ -226,9 +229,9 @@ class FeedbackAnalyzer {
 
     private DriftDirection computeDrift(OutcomeStatistics stats) {
         if (stats.totalOutcomes() < 5) return DriftDirection.INSUFFICIENT_DATA;
+        long decisive = stats.confirmedCount() + stats.noiseCount();
+        if (decisive < 10) return DriftDirection.INSUFFICIENT_DATA;
         if (stats.noiseRate() > 0.5) return DriftDirection.OVER_SENSITIVE;
-        if (stats.noiseRate() < 0.1 && stats.confirmedCount() > 10)
-            return DriftDirection.STABLE;
         return DriftDirection.STABLE;
     }
 }
@@ -246,8 +249,8 @@ never produced by the default analyzer.
 
 `@DefaultBean` in runtime/:
 
-- **shouldSuppress**: queries `ledger.lastNoiseDismissalTime()`, returns true if
-  within `config.suppressionCooldown()`
+- **shouldSuppress**: checks `lastNoiseDismissal` instant, returns true if
+  within `config.suppressionCooldown()` of current time
 - **adjustThreshold**: if OVER_SENSITIVE, increases threshold by
   `learningRate * (noiseRate - 0.5)`. If UNDER_SENSITIVE, decreases similarly.
   Result clamped to [0.0, 1.0]. Bounded by learningRate to prevent the confidence
@@ -263,9 +266,11 @@ never produced by the default analyzer.
 Policy checks suppression BEFORE returning a trigger decision:
 
 ```java
-if (feedback != null && feedbackStrategy.shouldSuppress(
+Optional<Instant> lastDismissal = outcomeLedger.get().lastNoiseDismissalTime(
+    definition.situationId(), context.correlationKey(), context.tenancyId());
+if (feedback != null && feedbackStrategy.get().shouldSuppress(
         definition.situationId(), context.correlationKey(),
-        context.tenancyId(), feedback, outcomeLedger)) {
+        context.tenancyId(), feedback, lastDismissal)) {
     return new PolicyDecision(TriggerDecision.SUPPRESS,
         Map.of("suppressionReason", "noise_dismiss_cooldown"));
 }
@@ -319,27 +324,32 @@ never mutated. Overrides recomputed from `OutcomeStatistics` on restart by Feedb
 
 ### 4. NaiveBayes Prior Updating
 
-`NaiveBayesGanglion` gains a `volatile double[] feedbackAdjustedLogPriors` field +
-`updatePriors(double[])` method. `updatePriors()` accepts raw probabilities (as
-produced by `FeedbackStrategy.adjustPriors()`) and converts to log space before
-storing — `NaiveBayesGanglion` operates entirely in log space internally:
+`NaiveBayesGanglion` gains a per-`(situationId, tenancyId)` prior override map.
+A single ganglion can serve multiple situations and tenants — different tenants
+produce different outcome distributions, so prior adjustments must be per-tenant.
+`updatePriors()` accepts raw probabilities and converts to log space before storing:
 
 ```java
-void updatePriors(double[] rawPriors) {
-    this.feedbackAdjustedLogPriors = Arrays.stream(rawPriors).map(Math::log).toArray();
+private record SituationTenantKey(String situationId, String tenancyId) {}
+private final ConcurrentHashMap<SituationTenantKey, double[]> feedbackAdjustedLogPriors =
+    new ConcurrentHashMap<>();
+
+void updatePriors(String situationId, String tenancyId, double[] rawPriors) {
+    feedbackAdjustedLogPriors.put(
+        new SituationTenantKey(situationId, tenancyId),
+        Arrays.stream(rawPriors).map(Math::log).toArray());
 }
 ```
 
 In `detect()`, new situation instances initialize from adjusted log priors (if
-present) instead of config log priors:
+present for this situation+tenant) instead of config log priors:
 
 ```java
 GanglionState loaded = stateStore.load(key)
     .orElseGet(() -> {
-        double[] priors = feedbackAdjustedLogPriors != null
-            ? Arrays.copyOf(feedbackAdjustedLogPriors, feedbackAdjustedLogPriors.length)
-            : Arrays.copyOf(logPriors, logPriors.length);
-        return new GanglionState(priors, OptionalLong.empty());
+        var priorKey = new SituationTenantKey(context.situationId(), context.tenancyId());
+        double[] priors = feedbackAdjustedLogPriors.getOrDefault(priorKey, logPriors);
+        return new GanglionState(Arrays.copyOf(priors, priors.length), OptionalLong.empty());
     });
 ```
 
