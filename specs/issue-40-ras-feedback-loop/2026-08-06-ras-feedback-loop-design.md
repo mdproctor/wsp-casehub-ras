@@ -323,7 +323,19 @@ class FeedbackState {
     OptionalDouble effectiveThreshold(String situationId, String tenancyId) { ... }
     Optional<double[]> adjustedPriors(String ganglionId, String tenancyId) { ... }
     void applyThresholdOverride(String situationId, String tenancyId, double threshold) { ... }
-    void applyPriorOverride(String ganglionId, String tenancyId, double[] priors) { ... }
+
+    void applyPriorOverride(String ganglionId, String tenancyId, double[] rawPriors) {
+        for (int i = 0; i < rawPriors.length; i++) {
+            if (Double.isNaN(rawPriors[i]) || rawPriors[i] <= 0.0) {
+                LOG.warning("Rejecting feedback priors for ganglion '" + ganglionId
+                    + "' tenant '" + tenancyId + "': prior[" + i + "] = " + rawPriors[i]
+                    + " — zero/negative priors make outcomes permanently impossible");
+                return;
+            }
+        }
+        priorOverrides.put(new StateKey(ganglionId, tenancyId),
+            Arrays.stream(rawPriors).map(Math::log).toArray());
+    }
 }
 ```
 
