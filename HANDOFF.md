@@ -1,19 +1,13 @@
 # HANDOFF — casehub-ras
 
 **Date:** 2026-08-06
-**Branch:** issue-40-ras-feedback-loop
+**Branch:** `issue-40-ras-feedback-loop`
 **Issue:** #40
 
-## Last session
+## Last Session
 
-Designed and started implementing the RAS feedback loop. Composable pipeline
-(ingestion → analysis → application) with split SPIs: SuppressionStrategy
-(real-time) and FeedbackTuningStrategy (batch). Advisory mode default.
-4-dimension adversarial design review refined the architecture — FeedbackState
-extraction, policy purity, log-space prior boundary. Tasks 1-3 of 9 complete:
-core types/SPIs, InMemoryOutcomeLedger, FeedbackState + default strategies.
+Implemented Tasks 4-5 of the feedback loop plan. Task 4 wired `outcomeGroundTruth` into `GanglionDescriptor.NaiveBayes` and `NaiveBayesConfig`, added `feedbackConfig()`, `allSituationIds()`, `ganglionDescriptor()` to the registry with `descriptorsById` map, and threaded `FeedbackState` through to `NaiveBayesGanglion` for tenant-scoped adjusted priors on new instances. Task 5 added pre-detection suppression and effective threshold construction to `SituationEvaluator` — caught a spec error where suppression should return `false` (skip event) not `true` (terminated). 19 new tests, full build green.
 
-## Immediate next step
+## Immediate Next Step
 
-Run `/work` to resume branch. Continue with Task 4 (NaiveBayes + Registry
-integration) per plan at `plans/2026-08-06-ras-feedback-loop.md`.
+Continue with Task 6: OutcomeRecorder, FeedbackAnalyzer, FeedbackUpdateJob, FeedbackMetrics. This is the largest remaining task — the ingestion and batch pipeline. Needs `CaseOutcomeObserver` from `casehub-engine-api`. Run `/work` to resume.
