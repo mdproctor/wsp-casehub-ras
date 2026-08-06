@@ -259,6 +259,19 @@ never produced by the default analyzer.
   `newPrior = (1 - learningRate) * oldPrior + learningRate * empiricalFreq`.
   Renormalized. Only when `totalOutcomes >= 5` (INSUFFICIENT_DATA guard).
 
+### AdvisoryFeedbackStrategy
+
+Alternative `FeedbackStrategy` implementation in `runtime/`:
+
+- **shouldSuppress**: same as `AutomaticFeedbackStrategy` -- suppression is
+  a safe default that prevents known-noise repeat triggers
+- **adjustThreshold**: returns `OptionalDouble.empty()` -- no automatic adjustment
+- **adjustPriors**: returns `Optional.empty()` -- no automatic adjustment
+
+Metrics are surfaced through the same `FeedbackMetrics` gauges regardless of
+strategy. The advisory strategy lets operators observe detection quality drift
+without automated parameter changes.
+
 ## Mechanism Integration
 
 ### 1. Dismiss Suppression -- DefaultRasTriggerPolicy
@@ -294,10 +307,10 @@ Micrometer gauges, optional via `Instance<MeterRegistry>`:
 
 Updated periodically by FeedbackUpdateJob.
 
-**Recall is deferred.** Recall requires a false-negative signal — situations that
-should have been detected but weren't — which RAS cannot compute from its own outcome
-data. Deferred to #58. `DriftDirection.UNDER_SENSITIVE` is reserved in the enum for
-future external signal but never produced by the default analyzer.
+Per-ganglion attribution (precision/noise rate per individual ganglion within a
+situation) is deferred to #59 -- requires capturing the detection result breakdown
+in the outcome record. Recall is deferred to #60 -- requires an external
+missed-detection signal that RAS cannot compute from its own outcome data.
 
 ### 3. Threshold Drift -- SituationDefinitionRegistry overlay
 
@@ -361,7 +374,7 @@ returns the unwrapped ganglion (before `EvidenceExtractingGanglion` decoration).
 ```java
 Ganglion raw = registry.rawGanglion(ganglionId);
 if (raw instanceof NaiveBayesGanglion nbg) {
-    nbg.updatePriors(adjustedPriors);
+    nbg.updatePriors(situationId, tenancyId, adjustedPriors);
 }
 ```
 
@@ -393,15 +406,11 @@ void update() {
         if (config == null) continue;
 
         for (String tenancyId : ledger.distinctTenancies(situationId)) {
-            // 1. FeedbackAnalyzer.analyze() -> FeedbackReport
-            // 2. FeedbackStrategy.adjustThreshold() -> apply override to registry
-            // 3. FeedbackStrategy.adjustPriors() -> update NaiveBayesGanglion via rawGanglion()
-            // 4. FeedbackMetrics.update() -> refresh gauges
+            // 1. FeedbackAnalyzer.analyze(situationId, tenancyId, config) -> FeedbackReport
+            // 2. FeedbackStrategy.adjustThreshold(report, ...) -> apply override to registry
+            // 3. FeedbackStrategy.adjustPriors(report, ...) -> update NaiveBayesGanglion via rawGanglion()
+            // 4. FeedbackMetrics.update(situationId, tenancyId, report) -> refresh gauges
         }
-
-        // 5. OutcomeLedger.removeRecordsBefore() -> per-situation cleanup
-        ledger.removeRecordsBefore(situationId,
-            Instant.now().minus(config.retentionPeriod()));
     }
 }
 ```
@@ -410,13 +419,15 @@ void update() {
 `RegistrySnapshot.situationIds()` set via a new public method.
 
 Suppression is NOT in the job -- checked in real-time by the trigger policy.
+Outcome record cleanup is NOT in the job -- owned by `SituationExpiryJob`, consistent
+with its role as the single periodic cleanup owner (see §Changes to Existing Types).
 
 ## Module Placement
 
 | Component | Module | Pattern |
 |-----------|--------|---------|
 | `FeedbackConfig`, `OutcomeClassification`, `OutcomeRecord`, `OutcomeStatistics`, `FeedbackReport`, `DriftDirection`, `OutcomeLedger`, `FeedbackStrategy` | `api/` | Domain types + SPIs |
-| `OutcomeRecorder`, `FeedbackAnalyzer`, `AutomaticFeedbackStrategy`, `FeedbackUpdateJob`, `FeedbackMetrics` | `runtime/` | Runtime, gains `casehub-engine-api` dep |
+| `OutcomeRecorder`, `FeedbackAnalyzer`, `AutomaticFeedbackStrategy`, `AdvisoryFeedbackStrategy`, `FeedbackUpdateJob`, `FeedbackMetrics` | `runtime/` | Runtime, gains `casehub-engine-api` dep |
 | `JpaOutcomeLedger`, `OutcomeRecordEntity`, Flyway migration | `persistence-jpa/` | JPA persistence |
 | `InMemoryOutcomeLedger` | `persistence-memory/` | `@Alternative @Priority(100)` |
 | `AbstractOutcomeLedgerContractTest` | `api/` test-jar | Contract tests |
@@ -463,11 +474,12 @@ idempotent writes — at-least-once delivery of case outcome events is expected.
 |------|--------|
 | `SituationDefinition` | New `@Nullable FeedbackConfig feedbackConfig` field. New 11-arg constructor. Existing constructors default to null. |
 | `DefaultRasTriggerPolicy` | Constructor gains `Instance<FeedbackStrategy>` + `Instance<OutcomeLedger>`. Optional. |
-| `NaiveBayesGanglion` | `volatile double[] feedbackAdjustedLogPriors` + `updatePriors(double[])` (accepts raw, converts to log). |
+| `NaiveBayesGanglion` | `ConcurrentHashMap<SituationTenantKey, double[]> feedbackAdjustedLogPriors` + `updatePriors(situationId, tenancyId, rawPriors)`. Per-tenant prior overrides. |
 | `NaiveBayesConfig` | `@Nullable Map<String, String> outcomeGroundTruth`. |
 | `GanglionDescriptor.NaiveBayes` | `outcomeGroundTruth` field. |
 | `SituationDefinitionRegistry` | `thresholdOverrides` (keyed by `(situationId, tenancyId)`) + `effectiveThreshold()` + `feedbackConfig()` + `allSituationIds()` + `rawGanglion()`. |
 | `SituationEvaluator` | Resolves effective threshold from registry before calling `triggerPolicy.evaluate()`. |
+| `SituationExpiryJob` | Calls `OutcomeLedger.removeRecordsBefore()` via `Instance<OutcomeLedger>`. Iterates situations with `FeedbackConfig`, cleans per retention period. |
 | `YamlSituationDefinitionProvider` | Parses `feedback:` + `outcomeGroundTruth:`. |
 
 ## YAML Schema
