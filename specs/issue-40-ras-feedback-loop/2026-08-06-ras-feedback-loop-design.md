@@ -573,7 +573,9 @@ idempotent writes -- at-least-once delivery of case outcome events is expected.
 ### InMemoryOutcomeLedger
 
 `ConcurrentHashMap<String, List<OutcomeRecord>>` keyed by
-`situationId + "|" + tenancyId`. `@Alternative @Priority(100)`.
+`situationId + "|" + tenancyId`. `@DefaultBean` in `runtime/` (same pattern as
+`InMemoryGanglionStateStore` -- yields to JPA when `persistence-jpa/` is on
+the classpath, provides a fallback when no persistence module is deployed).
 
 ## Changes to Existing Types
 
