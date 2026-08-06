@@ -409,7 +409,7 @@ adjusted priors:
 GanglionState loaded = stateStore.load(key)
     .orElseGet(() -> {
         double[] priors = feedbackState != null
-            ? feedbackState.adjustedPriors(config.ganglionId(), context.tenancyId())
+            ? feedbackState.adjustedLogPriors(config.ganglionId(), context.tenancyId())
                 .orElse(Arrays.copyOf(logPriors, logPriors.length))
             : Arrays.copyOf(logPriors, logPriors.length);
         return new GanglionState(priors, OptionalLong.empty());
