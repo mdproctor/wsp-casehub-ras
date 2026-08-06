@@ -257,6 +257,13 @@ decides what the statistics mean and how to act on them.
 - **adjustPriors**: blends old priors toward empirical outcome distribution:
   `newPrior = (1 - learningRate) * oldPrior + learningRate * empiricalFreq`.
   Renormalized. Only when `totalOutcomes >= 5` (insufficient data guard).
+  Empirical frequencies use Laplace smoothing (add-one pseudocount per outcome)
+  to prevent zero-frequency outcomes:
+  `empiricalFreq[i] = (count[i] + 1) / (total + numOutcomes)`. This ensures no
+  outcome can reach zero probability, which would produce `-Infinity` in log space
+  and permanently disable that outcome class (same invariant as `NaiveBayesConfig`'s
+  `priors[i] > 0.0` validation). `FeedbackState.applyPriorOverride()` also validates
+  as defense-in-depth against custom strategy implementations that omit smoothing.
 
 Advisory mode: provide `DefaultSuppressionStrategy` with no `FeedbackTuningStrategy`
 override. The `FeedbackUpdateJob` checks `Instance<FeedbackTuningStrategy>.isResolvable()`
@@ -400,7 +407,11 @@ discipline.
 
 `GanglionDescriptor.NaiveBayes` gains optional `outcomeGroundTruth: Map<String, String>`
 mapping case outcome labels to NaiveBayes outcome names. FeedbackUpdateJob uses
-this to convert OutcomeStatistics into empirical frequencies.
+this to convert OutcomeStatistics into empirical frequencies. Validated at
+construction time: every value must exist in the ganglion's `outcomes` list (same
+pattern as `outcomeEvidenceTemplates` key validation in `NaiveBayesConfig`). A typo
+like `escalated: froud` instead of `escalated: fraud` fails loudly at startup rather
+than silently producing skewed priors.
 
 YAML:
 ```yaml
