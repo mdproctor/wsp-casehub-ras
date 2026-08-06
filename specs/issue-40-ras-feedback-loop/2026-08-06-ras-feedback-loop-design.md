@@ -31,7 +31,8 @@ Composable feedback pipeline with three layers:
 - **Split strategy SPIs** -- `SuppressionStrategy` and `FeedbackTuningStrategy`
   in api/. Separated by lifecycle: suppression is per-event on the hot path;
   tuning is batch every 5 minutes. Default implementations apply all mechanisms
-  within bounds. Advisory mode provides suppression only, no tuning.
+  within bounds. Advisory mode (`tuningEnabled: false`, the default) provides
+  suppression and metrics only — no threshold or prior adjustment.
 - **Suppression in SituationEvaluator** -- suppression is a pre-detection concern,
   not a policy decision. Checked before running ganglia or policy evaluation.
   `DefaultRasTriggerPolicy` stays pure with zero dependencies.
@@ -60,7 +61,8 @@ record FeedbackConfig(
     Set<String> confirmedLabels,     // case outcome labels meaning "this was real"
     Duration suppressionCooldown,    // per-instance cooldown after noise dismiss
     double learningRate,             // bounds prior/threshold adjustment (0.0-1.0)
-    Duration retentionPeriod         // how long to keep outcome records
+    Duration retentionPeriod,        // how long to keep outcome records
+    boolean tuningEnabled            // false = advisory mode (suppression + metrics only)
 ) {
     OutcomeClassification classify(String outcomeLabel) {
         if (noiseLabels.contains(outcomeLabel)) return OutcomeClassification.NOISE;
@@ -73,6 +75,7 @@ record FeedbackConfig(
 Validation: `noiseLabels` and `confirmedLabels` must be disjoint. Cooldown > 0.
 learningRate in (0.0, 1.0]. retentionPeriod > 0. retentionPeriod >= suppressionCooldown
 (otherwise cleanup destroys records needed for active suppression checks).
+tuningEnabled defaults to false (advisory mode).
 
 ### OutcomeClassification
 
@@ -224,6 +227,16 @@ class OutcomeRecorder implements CaseOutcomeObserver {
 Non-RAS cases (no situationId) and feedback-disabled situations silently skipped.
 Best-effort recording -- same philosophy as `SituationEventRecorder` from #43.
 
+Recording is synchronous on the engine's case-completion thread. A single
+`INSERT ... ON CONFLICT DO NOTHING` is sub-millisecond for PostgreSQL; the
+try/catch prevents error propagation. Async recording would add ordering,
+error handling, and lifecycle complexity for no demonstrated benefit at
+expected volumes.
+
+ASSUMPTION: `CaseOutcomeObserver.onOutcome()` is invoked synchronously by the
+engine during case completion. If the engine invokes it asynchronously (e.g.,
+via an event bus), the latency concern does not apply.
+
 ## Analysis Layer (runtime/)
 
 ### FeedbackAnalyzer
@@ -276,9 +289,12 @@ decides what the statistics mean and how to act on them.
   `priors[i] > 0.0` validation). `FeedbackState.applyPriorOverride()` also validates
   as defense-in-depth against custom strategy implementations that omit smoothing.
 
-Advisory mode: provide `DefaultSuppressionStrategy` with no `FeedbackTuningStrategy`
-override. The `FeedbackUpdateJob` checks `Instance<FeedbackTuningStrategy>.isResolvable()`
-and skips tuning when absent. Metrics are still updated regardless.
+Advisory mode: set `tuningEnabled: false` in `FeedbackConfig` (the default).
+`FeedbackUpdateJob` checks `config.tuningEnabled()` and skips threshold/prior
+adjustment when disabled. Suppression and metrics are still active regardless.
+`DefaultTuningStrategy` remains `@DefaultBean` — its availability is not the
+activation mechanism. Tuning requires explicit per-situation opt-in via
+`tuningEnabled: true`.
 
 ## Mechanism Integration
 
@@ -345,7 +361,15 @@ class FeedbackState {
             .map(logP -> normalizeLogToRaw(logP))
             .orElse(basePriors);
     }
-    void applyThresholdOverride(String situationId, String tenancyId, double threshold) { ... }
+    void applyThresholdOverride(String situationId, String tenancyId, double threshold) {
+        if (Double.isNaN(threshold) || threshold <= 0.0 || threshold > 1.0) {
+            LOG.warning("Rejecting feedback threshold for situation '" + situationId
+                + "' tenant '" + tenancyId + "': " + threshold
+                + " — must be in (0.0, 1.0]");
+            return;
+        }
+        thresholdOverrides.put(new StateKey(situationId, tenancyId), threshold);
+    }
 
     void applyPriorOverride(String ganglionId, String tenancyId, double[] rawPriors) {
         for (int i = 0; i < rawPriors.length; i++) {
@@ -456,12 +480,12 @@ void update() {
             Instant windowStart = Instant.now().minus(config.retentionPeriod());
             OutcomeStatistics stats = analyzer.analyze(situationId, tenancyId, config);
 
-            if (tuningStrategy.isResolvable()) {
+            if (config.tuningEnabled()) {
                 // Threshold adjustment (only for ChainMode.Threshold situations)
                 if (reg.definition().chainMode() instanceof ChainMode.Threshold threshold) {
                     double currentThreshold = feedbackState.effectiveThreshold(situationId, tenancyId)
                         .orElse(threshold.minConfidence());
-                    tuningStrategy.get().adjustThreshold(stats, currentThreshold, config)
+                    tuningStrategy.adjustThreshold(stats, currentThreshold, config)
                         .ifPresent(t -> feedbackState.applyThresholdOverride(situationId, tenancyId, t));
                 }
 
@@ -484,7 +508,7 @@ void update() {
 
                     double[] currentPriors = feedbackState.currentRawPriors(
                         ganglionId, tenancyId, nb.priors());
-                    tuningStrategy.get().adjustPriors(currentPriors, outcomeCounts, config)
+                    tuningStrategy.adjustPriors(currentPriors, outcomeCounts, config)
                         .ifPresent(p -> feedbackState.applyPriorOverride(ganglionId, tenancyId, p));
                 }
             }
@@ -512,7 +536,7 @@ not modified.
 | `FeedbackConfig`, `OutcomeClassification`, `OutcomeRecord`, `OutcomeStatistics`, `OutcomeLedger`, `SuppressionStrategy`, `FeedbackTuningStrategy` | `api/` | Domain types + SPIs |
 | `OutcomeRecorder`, `FeedbackAnalyzer`, `DefaultSuppressionStrategy`, `DefaultTuningStrategy`, `FeedbackUpdateJob`, `FeedbackMetrics`, `FeedbackState` | `runtime/` | Runtime, gains `casehub-engine-api` dep |
 | `JpaOutcomeLedger`, `OutcomeRecordEntity`, Flyway migration | `persistence-jpa/` | JPA persistence |
-| `InMemoryOutcomeLedger` | `persistence-memory/` | `@Alternative @Priority(100)` |
+| `InMemoryOutcomeLedger` | `runtime/` | `@DefaultBean` (same pattern as `InMemoryGanglionStateStore`) |
 | `AbstractOutcomeLedgerContractTest` | `api/` test-jar | Contract tests |
 
 ## Persistence
@@ -560,7 +584,7 @@ idempotent writes -- at-least-once delivery of case outcome events is expected.
 | `NaiveBayesGanglion` | Constructor gains optional `FeedbackState` parameter. Queries for tenant-scoped priors on new instance creation. No mutable internal state added. |
 | `NaiveBayesConfig` | `@Nullable Map<String, String> outcomeGroundTruth`. |
 | `GanglionDescriptor.NaiveBayes` | `outcomeGroundTruth` field. |
-| `SituationDefinitionRegistry` | Constructor gains `Instance<FeedbackState>` (passed through to ganglion construction). New `feedbackConfig()`, `allSituationIds()`, and `ganglionDescriptor(String)` methods. Descriptors already stored internally during construction. |
+| `SituationDefinitionRegistry` | Constructor gains `Instance<FeedbackState>` (passed through to ganglion construction). New `feedbackConfig()`, `allSituationIds()`, and `ganglionDescriptor(String)` methods. Phase 1 gains a parallel `descriptorsById` map populated alongside `gangliaById` during `constructGanglion()`. CDI ganglia (Phase 2) have no descriptor — `ganglionDescriptor()` returns null for them; callers guard with `instanceof GanglionDescriptor.NaiveBayes`. |
 | `YamlSituationDefinitionProvider` | Parses `feedback:` + `outcomeGroundTruth:`. |
 
 Note: `DefaultRasTriggerPolicy` and `SituationExpiryJob` are NOT modified.
@@ -586,6 +610,7 @@ situations:
       suppressionCooldown: PT6H
       learningRate: 0.1
       retentionPeriod: P90D
+      tuningEnabled: true
 
 ganglia:
   - ganglionId: fraud-classifier
