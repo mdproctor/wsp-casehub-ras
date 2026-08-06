@@ -126,6 +126,7 @@ interface OutcomeLedger {
     OutcomeStatistics statistics(String situationId, String tenancyId, Instant since);
     Optional<Instant> lastNoiseDismissalTime(
         String situationId, String correlationKey, String tenancyId);
+    Map<String, Long> countByLabel(String situationId, String tenancyId, Instant since);
     Set<String> distinctTenancies(String situationId);
     int removeRecordsBefore(String situationId, Instant cutoff);
 }
@@ -133,6 +134,9 @@ interface OutcomeLedger {
 
 `statistics()` is on the SPI so JPA pushes aggregation to SQL.
 `lastNoiseDismissalTime()` is a dedicated query for fast suppression checks.
+`countByLabel()` returns per-outcome-label counts (`GROUP BY outcome_label`) --
+used by `FeedbackUpdateJob` for NaiveBayes prior adjustment via `outcomeGroundTruth`.
+Separate from `statistics()` so the threshold-only path avoids per-label aggregation.
 `distinctTenancies()` returns `SELECT DISTINCT tenancy_id WHERE situation_id = ?` --
 used by `FeedbackUpdateJob` to discover the tenant iteration scope.
 `removeRecordsBefore()` is per-situation so retention periods are honoured individually.
@@ -158,15 +162,21 @@ interface FeedbackTuningStrategy {
     OptionalDouble adjustThreshold(OutcomeStatistics statistics, double currentThreshold,
                                     FeedbackConfig config);
 
-    Optional<double[]> adjustPriors(OutcomeStatistics statistics, double[] currentPriors,
-                                     List<String> outcomes, FeedbackConfig config);
+    Optional<double[]> adjustPriors(double[] currentPriors, long[] outcomeCounts,
+                                     FeedbackConfig config);
 }
 ```
 
-Batch, called by `FeedbackUpdateJob` every 5 minutes. Receives `OutcomeStatistics`
-directly -- the strategy makes its own interpretive decisions about drift
-classification. No pre-computed drift direction: whether a noise rate of 0.5
-means "over-sensitive" is a strategy concern, not an analysis concern.
+Batch, called by `FeedbackUpdateJob` every 5 minutes.
+
+`adjustThreshold` receives `OutcomeStatistics` directly -- the strategy makes its
+own interpretive decisions about drift classification.
+
+`adjustPriors` receives pre-mapped per-NaiveBayes-outcome counts (computed by the
+job from `countByLabel()` + `outcomeGroundTruth`), not raw statistics. The mapping
+from case outcome labels to NaiveBayes outcomes is a ganglion concern, not a
+strategy concern -- the strategy only decides how to blend priors toward empirical
+frequencies.
 
 ## Ingestion Layer (runtime/)
 
@@ -251,15 +261,16 @@ decides what the statistics mean and how to act on them.
 
 - **adjustThreshold**: if `statistics.noiseRate() > 0.5` (over-sensitive),
   increases threshold by `learningRate * (noiseRate - 0.5)`. Result clamped
-  to [0.0, 1.0]. Bounded by learningRate to prevent the confidence zeroing
+  to (0.0, 1.0] -- lower bound matches `ChainMode.Threshold`'s `minConfidence > 0.0`
+  validation. Bounded by learningRate to prevent the confidence zeroing
   gotcha (GE-20260714-439924 -- additive penalties at high frequency).
   Returns `OptionalDouble.empty()` when `totalOutcomes < 10` (insufficient data).
-- **adjustPriors**: blends old priors toward empirical outcome distribution:
-  `newPrior = (1 - learningRate) * oldPrior + learningRate * empiricalFreq`.
-  Renormalized. Only when `totalOutcomes >= 5` (insufficient data guard).
-  Empirical frequencies use Laplace smoothing (add-one pseudocount per outcome)
-  to prevent zero-frequency outcomes:
-  `empiricalFreq[i] = (count[i] + 1) / (total + numOutcomes)`. This ensures no
+- **adjustPriors**: receives `long[] outcomeCounts` (per-NaiveBayes-outcome counts,
+  pre-mapped by the job from `countByLabel` + `outcomeGroundTruth`). Applies Laplace
+  smoothing (add-one pseudocount per outcome) to prevent zero-frequency outcomes:
+  `empiricalFreq[i] = (outcomeCounts[i] + 1) / (total + numOutcomes)`.
+  Blends: `newPrior = (1 - learningRate) * oldPrior + learningRate * empiricalFreq`.
+  Renormalized. Returns `Optional.empty()` when total counts < 5. This ensures no
   outcome can reach zero probability, which would produce `-Infinity` in log space
   and permanently disable that outcome class (same invariant as `NaiveBayesConfig`'s
   `priors[i] > 0.0` validation). `FeedbackState.applyPriorOverride()` also validates
@@ -328,7 +339,12 @@ class FeedbackState {
     private record StateKey(String id, String tenancyId) {}
 
     OptionalDouble effectiveThreshold(String situationId, String tenancyId) { ... }
-    Optional<double[]> adjustedPriors(String ganglionId, String tenancyId) { ... }
+    Optional<double[]> adjustedLogPriors(String ganglionId, String tenancyId) { ... }
+    double[] currentRawPriors(String ganglionId, String tenancyId, double[] basePriors) {
+        return adjustedLogPriors(ganglionId, tenancyId)
+            .map(logP -> normalizeLogToRaw(logP))
+            .orElse(basePriors);
+    }
     void applyThresholdOverride(String situationId, String tenancyId, double threshold) { ... }
 
     void applyPriorOverride(String ganglionId, String tenancyId, double[] rawPriors) {
@@ -437,11 +453,43 @@ void update() {
         if (config == null) continue;
 
         for (String tenancyId : ledger.distinctTenancies(situationId)) {
-            // 1. FeedbackAnalyzer.analyze(situationId, tenancyId, config) -> OutcomeStatistics
-            // 2. If tuningStrategy.isResolvable():
-            //    a. tuningStrategy.adjustThreshold(stats, ...) -> apply to FeedbackState
-            //    b. tuningStrategy.adjustPriors(stats, ...) -> apply to FeedbackState
-            // 3. FeedbackMetrics.update(situationId, tenancyId, stats) -> refresh gauges
+            Instant windowStart = Instant.now().minus(config.retentionPeriod());
+            OutcomeStatistics stats = analyzer.analyze(situationId, tenancyId, config);
+
+            if (tuningStrategy.isResolvable()) {
+                // Threshold adjustment (only for ChainMode.Threshold situations)
+                if (reg.definition().chainMode() instanceof ChainMode.Threshold threshold) {
+                    double currentThreshold = feedbackState.effectiveThreshold(situationId, tenancyId)
+                        .orElse(threshold.minConfidence());
+                    tuningStrategy.get().adjustThreshold(stats, currentThreshold, config)
+                        .ifPresent(t -> feedbackState.applyThresholdOverride(situationId, tenancyId, t));
+                }
+
+                // Prior adjustment (per NaiveBayes ganglion in situation)
+                for (String ganglionId : reg.definition().chainMode().referencedGanglia()) {
+                    GanglionDescriptor desc = registry.ganglionDescriptor(ganglionId);
+                    if (!(desc instanceof GanglionDescriptor.NaiveBayes nb)) continue;
+                    if (nb.outcomeGroundTruth() == null) continue;
+
+                    // Map per-label counts to per-outcome counts via outcomeGroundTruth
+                    Map<String, Long> labelCounts =
+                        ledger.countByLabel(situationId, tenancyId, windowStart);
+                    long[] outcomeCounts = new long[nb.outcomes().size()];
+                    for (var entry : labelCounts.entrySet()) {
+                        String outcomeName = nb.outcomeGroundTruth().get(entry.getKey());
+                        if (outcomeName != null) {
+                            outcomeCounts[nb.outcomes().indexOf(outcomeName)] += entry.getValue();
+                        }
+                    }
+
+                    double[] currentPriors = feedbackState.currentRawPriors(
+                        ganglionId, tenancyId, nb.priors());
+                    tuningStrategy.get().adjustPriors(currentPriors, outcomeCounts, config)
+                        .ifPresent(p -> feedbackState.applyPriorOverride(ganglionId, tenancyId, p));
+                }
+            }
+
+            feedbackMetrics.update(situationId, tenancyId, stats);
         }
 
         // 4. OutcomeLedger.removeRecordsBefore(situationId, retentionCutoff) -> cleanup
@@ -512,7 +560,7 @@ idempotent writes -- at-least-once delivery of case outcome events is expected.
 | `NaiveBayesGanglion` | Constructor gains optional `FeedbackState` parameter. Queries for tenant-scoped priors on new instance creation. No mutable internal state added. |
 | `NaiveBayesConfig` | `@Nullable Map<String, String> outcomeGroundTruth`. |
 | `GanglionDescriptor.NaiveBayes` | `outcomeGroundTruth` field. |
-| `SituationDefinitionRegistry` | Constructor gains `Instance<FeedbackState>` (passed through to ganglion construction). New `feedbackConfig()` convenience method. New `allSituationIds()` method. |
+| `SituationDefinitionRegistry` | Constructor gains `Instance<FeedbackState>` (passed through to ganglion construction). New `feedbackConfig()`, `allSituationIds()`, and `ganglionDescriptor(String)` methods. Descriptors already stored internally during construction. |
 | `YamlSituationDefinitionProvider` | Parses `feedback:` + `outcomeGroundTruth:`. |
 
 Note: `DefaultRasTriggerPolicy` and `SituationExpiryJob` are NOT modified.
