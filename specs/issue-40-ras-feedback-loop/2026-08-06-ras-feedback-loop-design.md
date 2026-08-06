@@ -18,19 +18,28 @@ Composable feedback pipeline with three layers:
 1. **Ingestion** -- `OutcomeRecorder` receives case outcomes via the platform's
    `CaseOutcomeObserver` SPI, correlates to situations, stores in `OutcomeLedger`
 2. **Analysis** -- `FeedbackAnalyzer` computes aggregate statistics (precision,
-   noise rate, drift direction) from outcome records
-3. **Application** -- `FeedbackStrategy` SPI decides what to do with analysis
-   results. Strategy-based: default is automatic; alternative advisory strategy
-   surfaces metrics without modifying detection parameters.
+   noise rate) from outcome records within the configured retention window
+3. **Application** -- Split SPIs: `SuppressionStrategy` (real-time suppress-or-fire
+   per event) and `FeedbackTuningStrategy` (batch threshold/prior adjustment).
+   Default implementations handle both; advisory mode provides suppression only.
 
 ## Key Design Decisions
 
 - **Feedback config on SituationDefinition** -- per-situation opt-in via
   `FeedbackConfig` field. Absent = no feedback. Outcome label classification
   (noise/confirmed) is intrinsic to the situation, not operational overlay.
-- **Strategy-based application** -- `FeedbackStrategy` SPI in api/. Default
-  `AutomaticFeedbackStrategy` applies all mechanisms within bounds. Alternative
-  `AdvisoryFeedbackStrategy` applies suppression only, surfaces rest as metrics.
+- **Split strategy SPIs** -- `SuppressionStrategy` and `FeedbackTuningStrategy`
+  in api/. Separated by lifecycle: suppression is per-event on the hot path;
+  tuning is batch every 5 minutes. Default implementations apply all mechanisms
+  within bounds. Advisory mode provides suppression only, no tuning.
+- **Suppression in SituationEvaluator** -- suppression is a pre-detection concern,
+  not a policy decision. Checked before running ganglia or policy evaluation.
+  `DefaultRasTriggerPolicy` stays pure with zero dependencies.
+- **FeedbackState component** -- mutable feedback-derived state (threshold
+  overrides, prior adjustments) lives in a dedicated `FeedbackState` bean in
+  runtime/, not on `SituationDefinitionRegistry` (immutable-snapshot discipline)
+  or `NaiveBayesGanglion` (no mutable internal state). All overrides are
+  tenant-scoped: keyed by `(id, tenancyId)`.
 - **Direct engine-api dependency** -- `runtime/` depends on `casehub-engine-api`
   for `CaseOutcomeObserver`/`CaseOutcomeEvent`. Correct direction
   (integration -> foundation). No wrapper types.
@@ -109,26 +118,6 @@ record OutcomeStatistics(
 }
 ```
 
-### FeedbackReport
-
-Wraps statistics with derived analysis:
-
-```java
-record FeedbackReport(
-    OutcomeStatistics statistics,
-    DriftDirection drift,
-    double precision,
-    double noiseRate
-) {}
-
-enum DriftDirection {
-    OVER_SENSITIVE,     // noiseRate above threshold -- too many false triggers
-    UNDER_SENSITIVE,    // reserved for future external signal (missed detections)
-    STABLE,
-    INSUFFICIENT_DATA
-}
-```
-
 ### OutcomeLedger (SPI)
 
 ```java
@@ -144,24 +133,40 @@ interface OutcomeLedger {
 
 `statistics()` is on the SPI so JPA pushes aggregation to SQL.
 `lastNoiseDismissalTime()` is a dedicated query for fast suppression checks.
-`distinctTenancies()` returns `SELECT DISTINCT tenancy_id WHERE situation_id = ?` —
+`distinctTenancies()` returns `SELECT DISTINCT tenancy_id WHERE situation_id = ?` --
 used by `FeedbackUpdateJob` to discover the tenant iteration scope.
 `removeRecordsBefore()` is per-situation so retention periods are honoured individually.
 
-### FeedbackStrategy (SPI)
+### SuppressionStrategy (SPI)
 
 ```java
-interface FeedbackStrategy {
+interface SuppressionStrategy {
     boolean shouldSuppress(String situationId, String correlationKey, String tenancyId,
-                           FeedbackConfig config, Optional<Instant> lastNoiseDismissal);
+                           FeedbackConfig config, Optional<Instant> lastNoiseDismissalTime);
+}
+```
 
-    OptionalDouble adjustThreshold(FeedbackReport report, double currentThreshold,
+Per-event, on the hot path. Receives pre-queried data from the caller (the
+evaluator queries the ledger), not the raw ledger. This makes the contract
+explicit: suppression depends on the last noise dismissal time, nothing else.
+Strategies are testable without mocking a data store.
+
+### FeedbackTuningStrategy (SPI)
+
+```java
+interface FeedbackTuningStrategy {
+    OptionalDouble adjustThreshold(OutcomeStatistics statistics, double currentThreshold,
                                     FeedbackConfig config);
 
-    Optional<double[]> adjustPriors(FeedbackReport report, double[] currentPriors,
+    Optional<double[]> adjustPriors(OutcomeStatistics statistics, double[] currentPriors,
                                      List<String> outcomes, FeedbackConfig config);
 }
 ```
+
+Batch, called by `FeedbackUpdateJob` every 5 minutes. Receives `OutcomeStatistics`
+directly -- the strategy makes its own interpretive decisions about drift
+classification. No pre-computed drift direction: whether a noise rate of 0.5
+means "over-sensitive" is a strategy concern, not an analysis concern.
 
 ## Ingestion Layer (runtime/)
 
@@ -218,82 +223,74 @@ Best-effort recording -- same philosophy as `SituationEventRecorder` from #43.
 class FeedbackAnalyzer {
     @Inject OutcomeLedger ledger;
 
-    FeedbackReport analyze(String situationId, String tenancyId, FeedbackConfig config) {
-        OutcomeStatistics stats = ledger.statistics(
+    OutcomeStatistics analyze(String situationId, String tenancyId, FeedbackConfig config) {
+        return ledger.statistics(
             situationId, tenancyId,
             Instant.now().minus(config.retentionPeriod()));
-
-        DriftDirection drift = computeDrift(stats);
-        return new FeedbackReport(stats, drift, stats.precision(), stats.noiseRate());
-    }
-
-    private DriftDirection computeDrift(OutcomeStatistics stats) {
-        if (stats.totalOutcomes() < 5) return DriftDirection.INSUFFICIENT_DATA;
-        long decisive = stats.confirmedCount() + stats.noiseCount();
-        if (decisive < 10) return DriftDirection.INSUFFICIENT_DATA;
-        if (stats.noiseRate() > 0.5) return DriftDirection.OVER_SENSITIVE;
-        return DriftDirection.STABLE;
     }
 }
 ```
 
-Drift thresholds (0.5 noise rate for OVER_SENSITIVE) are sensible defaults on
-`AutomaticFeedbackStrategy`. Custom strategies can use different cutoffs.
-UNDER_SENSITIVE requires an external signal (missed detections) that RAS cannot
-compute from its own outcome data -- reserved in the enum for future use but
-never produced by the default analyzer.
+The analyzer applies the retention window from `FeedbackConfig` and returns raw
+`OutcomeStatistics`. No interpretive classification (drift direction, sensitivity
+thresholds) -- that responsibility belongs to the `FeedbackTuningStrategy`, which
+decides what the statistics mean and how to act on them.
 
 ## Application Layer (runtime/)
 
-### AutomaticFeedbackStrategy
+### DefaultSuppressionStrategy
 
 `@DefaultBean` in runtime/:
 
-- **shouldSuppress**: checks `lastNoiseDismissal` instant, returns true if
+- **shouldSuppress**: returns true if `lastNoiseDismissalTime` is present and
   within `config.suppressionCooldown()` of current time
-- **adjustThreshold**: if OVER_SENSITIVE, increases threshold by
-  `learningRate * (noiseRate - 0.5)`. If UNDER_SENSITIVE, decreases similarly.
-  Result clamped to [0.0, 1.0]. Bounded by learningRate to prevent the confidence
-  zeroing gotcha (GE-20260714-439924 -- additive penalties at high frequency).
+
+### DefaultTuningStrategy
+
+`@DefaultBean` in runtime/:
+
+- **adjustThreshold**: if `statistics.noiseRate() > 0.5` (over-sensitive),
+  increases threshold by `learningRate * (noiseRate - 0.5)`. Result clamped
+  to [0.0, 1.0]. Bounded by learningRate to prevent the confidence zeroing
+  gotcha (GE-20260714-439924 -- additive penalties at high frequency).
+  Returns `OptionalDouble.empty()` when `totalOutcomes < 10` (insufficient data).
 - **adjustPriors**: blends old priors toward empirical outcome distribution:
   `newPrior = (1 - learningRate) * oldPrior + learningRate * empiricalFreq`.
-  Renormalized. Only when `totalOutcomes >= 5` (INSUFFICIENT_DATA guard).
+  Renormalized. Only when `totalOutcomes >= 5` (insufficient data guard).
 
-### AdvisoryFeedbackStrategy
-
-Alternative `FeedbackStrategy` implementation in `runtime/`:
-
-- **shouldSuppress**: same as `AutomaticFeedbackStrategy` -- suppression is
-  a safe default that prevents known-noise repeat triggers
-- **adjustThreshold**: returns `OptionalDouble.empty()` -- no automatic adjustment
-- **adjustPriors**: returns `Optional.empty()` -- no automatic adjustment
-
-Metrics are surfaced through the same `FeedbackMetrics` gauges regardless of
-strategy. The advisory strategy lets operators observe detection quality drift
-without automated parameter changes.
+Advisory mode: provide `DefaultSuppressionStrategy` with no `FeedbackTuningStrategy`
+override. The `FeedbackUpdateJob` checks `Instance<FeedbackTuningStrategy>.isResolvable()`
+and skips tuning when absent. Metrics are still updated regardless.
 
 ## Mechanism Integration
 
-### 1. Dismiss Suppression -- DefaultRasTriggerPolicy
+### 1. Dismiss Suppression -- SituationEvaluator
 
-Policy checks suppression BEFORE returning a trigger decision:
+`SituationEvaluator` checks suppression BEFORE loading context or running
+detection, saving wasted ganglion compute for suppressed events:
 
 ```java
-Optional<Instant> lastDismissal = outcomeLedger.get().lastNoiseDismissalTime(
-    definition.situationId(), context.correlationKey(), context.tenancyId());
-if (feedback != null && feedbackStrategy.get().shouldSuppress(
-        definition.situationId(), context.correlationKey(),
-        context.tenancyId(), feedback, lastDismissal)) {
-    return new PolicyDecision(TriggerDecision.SUPPRESS,
-        Map.of("suppressionReason", "noise_dismiss_cooldown"));
+FeedbackConfig feedbackConfig = definition.feedbackConfig();
+if (feedbackConfig != null
+        && suppressionStrategy.isResolvable()
+        && outcomeLedger.isResolvable()) {
+    Optional<Instant> lastDismissal = outcomeLedger.get().lastNoiseDismissalTime(
+        situationId, correlationKey, tenancyId);
+    if (suppressionStrategy.get().shouldSuppress(
+            situationId, correlationKey, tenancyId, feedbackConfig, lastDismissal)) {
+        metrics.feedbackSuppression(situationId, tenancyId);
+        return true;
+    }
 }
 ```
 
-`DefaultRasTriggerPolicy` gains `Instance<FeedbackStrategy>` +
-`Instance<OutcomeLedger>` constructor dependencies. Optional -- absent means
-no suppression. Evaluator already handles SUPPRESS: fires
-`SituationChangeEvent.ChangeType.SUPPRESSED`, removes situation, increments
-`ras.engine.situations.suppressed` metric.
+`DefaultRasTriggerPolicy` is unchanged -- zero dependencies, pure function of
+`(SituationContext, SituationDefinition)`. The `RasTriggerPolicy` SPI contract
+(all decision inputs in parameters) is preserved.
+
+`SituationEvaluator` gains `Instance<SuppressionStrategy>` +
+`Instance<OutcomeLedger>` + `Instance<FeedbackState>` constructor dependencies.
+All optional via `Instance<>` -- absent means no feedback.
 
 ### 2. Detection Quality Metrics -- FeedbackMetrics
 
@@ -301,82 +298,93 @@ Micrometer gauges, optional via `Instance<MeterRegistry>`:
 
 - `ras.feedback.precision` -- gauge per (situationId, tenancyId)
 - `ras.feedback.noise_rate` -- gauge per (situationId, tenancyId)
-- `ras.feedback.drift` -- tagged gauge (direction)
 - `ras.feedback.outcomes_total` -- counter per (situationId, tenancyId, classification)
 - `ras.feedback.suppressions_total` -- counter per (situationId, tenancyId)
 
 Updated periodically by FeedbackUpdateJob.
 
-Per-ganglion attribution (precision/noise rate per individual ganglion within a
-situation) is deferred to #59 -- requires capturing the detection result breakdown
-in the outcome record. Recall is deferred to #60 -- requires an external
-missed-detection signal that RAS cannot compute from its own outcome data.
+**Recall is deferred.** Recall requires a false-negative signal -- situations that
+should have been detected but weren't -- which RAS cannot compute from its own outcome
+data. Deferred to #58.
 
-### 3. Threshold Drift -- SituationDefinitionRegistry overlay
+### 3. Threshold Drift + Prior Overrides -- FeedbackState
 
-`SituationDefinitionRegistry` gains an `effectiveThreshold` overlay keyed by
-`(situationId, tenancyId)`:
+New `@ApplicationScoped` component in `runtime/` centralising all
+feedback-derived mutable state with tenant scoping:
 
 ```java
-private record ThresholdKey(String situationId, String tenancyId) {}
-private final ConcurrentHashMap<ThresholdKey, Double> thresholdOverrides = new ConcurrentHashMap<>();
+@ApplicationScoped
+class FeedbackState {
+    private final ConcurrentHashMap<StateKey, Double> thresholdOverrides = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<StateKey, double[]> priorOverrides = new ConcurrentHashMap<>();
 
-void applyThresholdOverride(String situationId, String tenancyId, double adjustedThreshold) { ... }
-Optional<Double> effectiveThreshold(String situationId, String tenancyId) { ... }
+    private record StateKey(String id, String tenancyId) {}
+
+    OptionalDouble effectiveThreshold(String situationId, String tenancyId) { ... }
+    Optional<double[]> adjustedPriors(String ganglionId, String tenancyId) { ... }
+    void applyThresholdOverride(String situationId, String tenancyId, double threshold) { ... }
+    void applyPriorOverride(String ganglionId, String tenancyId, double[] priors) { ... }
+}
 ```
+
+**Threshold override application:** `SituationEvaluator` queries
+`FeedbackState.effectiveThreshold()` and constructs an effective
+`SituationDefinition` before calling `triggerPolicy.evaluate()`. The policy
+sees the adjusted `minConfidence` as normal immutable input:
+
+```java
+SituationDefinition effectiveDef = definition;
+if (feedbackState.isResolvable()
+        && definition.chainMode() instanceof ChainMode.Threshold threshold) {
+    OptionalDouble adjusted = feedbackState.get()
+        .effectiveThreshold(situationId, tenancyId);
+    if (adjusted.isPresent()) {
+        effectiveDef = definition.withChainMode(
+            new ChainMode.Threshold(threshold.ganglia(), adjusted.getAsDouble()));
+    }
+}
+PolicyDecision policyDecision = triggerPolicy.evaluate(context, effectiveDef);
+```
+
+`SituationDefinition` gains a `withChainMode(ChainMode)` method for this
+construction. Original definition is never mutated.
 
 **Scope:** threshold drift applies only to `ChainMode.Threshold` in this iteration.
 `ChainMode.Rate.minRate` is a structurally analogous tunable but is deferred to #57.
 
-**Resolution:** `SituationEvaluator` resolves the effective threshold before passing
-the definition to the trigger policy. When an override exists, the evaluator constructs
-a new `SituationDefinition` with a modified `ChainMode.Threshold(ganglia, effectiveMinConfidence)`
-and passes that to `triggerPolicy.evaluate()`. The policy interface is unchanged — it
-sees a definition with the correct threshold already applied. Original definition is
-never mutated. Overrides recomputed from `OutcomeStatistics` on restart by FeedbackUpdateJob.
+**Why not on SituationDefinitionRegistry:** The registry uses a `volatile
+RegistrySnapshot` pattern -- immutable snapshots, swap-on-write. Adding
+`ConcurrentHashMap` mutable state that changes every 5 minutes violates this
+discipline. The registry is a registration/lookup service; `FeedbackState`
+holds runtime feedback state. Separate concerns, separate components.
+
+**Tenant scoping:** Both maps key on `(id, tenancyId)`. If Tenant A has a
+90% noise rate and Tenant B has 5%, their overrides are independent. No
+cross-tenant contamination. Overrides recomputed from `OutcomeStatistics` on
+restart by `FeedbackUpdateJob`.
 
 ### 4. NaiveBayes Prior Updating
 
-`NaiveBayesGanglion` gains a per-`(situationId, tenancyId)` prior override map.
-A single ganglion can serve multiple situations and tenants — different tenants
-produce different outcome distributions, so prior adjustments must be per-tenant.
-`updatePriors()` accepts raw probabilities and converts to log space before storing:
-
-```java
-private record SituationTenantKey(String situationId, String tenancyId) {}
-private final ConcurrentHashMap<SituationTenantKey, double[]> feedbackAdjustedLogPriors =
-    new ConcurrentHashMap<>();
-
-void updatePriors(String situationId, String tenancyId, double[] rawPriors) {
-    feedbackAdjustedLogPriors.put(
-        new SituationTenantKey(situationId, tenancyId),
-        Arrays.stream(rawPriors).map(Math::log).toArray());
-}
-```
-
-In `detect()`, new situation instances initialize from adjusted log priors (if
-present for this situation+tenant) instead of config log priors:
+`NaiveBayesGanglion` gains an optional `FeedbackState` constructor parameter
+(passed through by `SituationDefinitionRegistry.constructNaiveBayes()`). In
+`detect()`, new situation instances query `FeedbackState` for tenant-scoped
+adjusted priors:
 
 ```java
 GanglionState loaded = stateStore.load(key)
     .orElseGet(() -> {
-        var priorKey = new SituationTenantKey(context.situationId(), context.tenancyId());
-        double[] priors = feedbackAdjustedLogPriors.getOrDefault(priorKey, logPriors);
-        return new GanglionState(Arrays.copyOf(priors, priors.length), OptionalLong.empty());
+        double[] priors = feedbackState != null
+            ? feedbackState.adjustedPriors(config.ganglionId(), context.tenancyId())
+                .orElse(Arrays.copyOf(logPriors, logPriors.length))
+            : Arrays.copyOf(logPriors, logPriors.length);
+        return new GanglionState(priors, OptionalLong.empty());
     });
 ```
 
-`SituationDefinitionRegistry` gains a `rawGanglion(String ganglionId)` method that
-returns the unwrapped ganglion (before `EvidenceExtractingGanglion` decoration).
-`FeedbackUpdateJob` uses this to reach the concrete `NaiveBayesGanglion` via
-`instanceof` without fighting the decorator layer:
-
-```java
-Ganglion raw = registry.rawGanglion(ganglionId);
-if (raw instanceof NaiveBayesGanglion nbg) {
-    nbg.updatePriors(situationId, tenancyId, adjustedPriors);
-}
-```
+No mutable internal state on the ganglion. The ganglion delegates per-instance
+state to `GanglionStateStore` and queries `FeedbackState` for per-tenant
+feedback-adjusted initial priors. This preserves the ganglion's existing state
+discipline.
 
 `GanglionDescriptor.NaiveBayes` gains optional `outcomeGroundTruth: Map<String, String>`
 mapping case outcome labels to NaiveBayes outcome names. FeedbackUpdateJob uses
@@ -406,11 +414,14 @@ void update() {
         if (config == null) continue;
 
         for (String tenancyId : ledger.distinctTenancies(situationId)) {
-            // 1. FeedbackAnalyzer.analyze(situationId, tenancyId, config) -> FeedbackReport
-            // 2. FeedbackStrategy.adjustThreshold(report, ...) -> apply override to registry
-            // 3. FeedbackStrategy.adjustPriors(report, ...) -> update NaiveBayesGanglion via rawGanglion()
-            // 4. FeedbackMetrics.update(situationId, tenancyId, report) -> refresh gauges
+            // 1. FeedbackAnalyzer.analyze(situationId, tenancyId, config) -> OutcomeStatistics
+            // 2. If tuningStrategy.isResolvable():
+            //    a. tuningStrategy.adjustThreshold(stats, ...) -> apply to FeedbackState
+            //    b. tuningStrategy.adjustPriors(stats, ...) -> apply to FeedbackState
+            // 3. FeedbackMetrics.update(situationId, tenancyId, stats) -> refresh gauges
         }
+
+        // 4. OutcomeLedger.removeRecordsBefore(situationId, retentionCutoff) -> cleanup
     }
 }
 ```
@@ -418,16 +429,17 @@ void update() {
 `SituationDefinitionRegistry.allSituationIds()` exposes the existing
 `RegistrySnapshot.situationIds()` set via a new public method.
 
-Suppression is NOT in the job -- checked in real-time by the trigger policy.
-Outcome record cleanup is NOT in the job -- owned by `SituationExpiryJob`, consistent
-with its role as the single periodic cleanup owner (see §Changes to Existing Types).
+Suppression is NOT in the job -- checked in real-time by `SituationEvaluator`.
+Cleanup is owned solely by this job -- outcome records are feedback data and
+their retention period is defined by `FeedbackConfig`. `SituationExpiryJob` is
+not modified.
 
 ## Module Placement
 
 | Component | Module | Pattern |
 |-----------|--------|---------|
-| `FeedbackConfig`, `OutcomeClassification`, `OutcomeRecord`, `OutcomeStatistics`, `FeedbackReport`, `DriftDirection`, `OutcomeLedger`, `FeedbackStrategy` | `api/` | Domain types + SPIs |
-| `OutcomeRecorder`, `FeedbackAnalyzer`, `AutomaticFeedbackStrategy`, `AdvisoryFeedbackStrategy`, `FeedbackUpdateJob`, `FeedbackMetrics` | `runtime/` | Runtime, gains `casehub-engine-api` dep |
+| `FeedbackConfig`, `OutcomeClassification`, `OutcomeRecord`, `OutcomeStatistics`, `OutcomeLedger`, `SuppressionStrategy`, `FeedbackTuningStrategy` | `api/` | Domain types + SPIs |
+| `OutcomeRecorder`, `FeedbackAnalyzer`, `DefaultSuppressionStrategy`, `DefaultTuningStrategy`, `FeedbackUpdateJob`, `FeedbackMetrics`, `FeedbackState` | `runtime/` | Runtime, gains `casehub-engine-api` dep |
 | `JpaOutcomeLedger`, `OutcomeRecordEntity`, Flyway migration | `persistence-jpa/` | JPA persistence |
 | `InMemoryOutcomeLedger` | `persistence-memory/` | `@Alternative @Priority(100)` |
 | `AbstractOutcomeLedgerContractTest` | `api/` test-jar | Contract tests |
@@ -461,7 +473,7 @@ CREATE INDEX idx_outcome_suppression
 `lastNoiseDismissalTime()` query filters NOISE in the index scan.
 
 `JpaOutcomeLedger.record()` uses `INSERT ... ON CONFLICT (case_id) DO NOTHING` for
-idempotent writes — at-least-once delivery of case outcome events is expected.
+idempotent writes -- at-least-once delivery of case outcome events is expected.
 
 ### InMemoryOutcomeLedger
 
@@ -472,15 +484,15 @@ idempotent writes — at-least-once delivery of case outcome events is expected.
 
 | Type | Change |
 |------|--------|
-| `SituationDefinition` | New `@Nullable FeedbackConfig feedbackConfig` field. New 11-arg constructor. Existing constructors default to null. |
-| `DefaultRasTriggerPolicy` | Constructor gains `Instance<FeedbackStrategy>` + `Instance<OutcomeLedger>`. Optional. |
-| `NaiveBayesGanglion` | `ConcurrentHashMap<SituationTenantKey, double[]> feedbackAdjustedLogPriors` + `updatePriors(situationId, tenancyId, rawPriors)`. Per-tenant prior overrides. |
+| `SituationDefinition` | New `@Nullable FeedbackConfig feedbackConfig` field. New 11-arg constructor. Existing constructors default to null. New `withChainMode(ChainMode)` method for threshold override construction. |
+| `SituationEvaluator` | Constructor gains `Instance<SuppressionStrategy>` + `Instance<OutcomeLedger>` + `Instance<FeedbackState>`. Pre-detection suppression check. Effective threshold construction before policy evaluation. |
+| `NaiveBayesGanglion` | Constructor gains optional `FeedbackState` parameter. Queries for tenant-scoped priors on new instance creation. No mutable internal state added. |
 | `NaiveBayesConfig` | `@Nullable Map<String, String> outcomeGroundTruth`. |
 | `GanglionDescriptor.NaiveBayes` | `outcomeGroundTruth` field. |
-| `SituationDefinitionRegistry` | `thresholdOverrides` (keyed by `(situationId, tenancyId)`) + `effectiveThreshold()` + `feedbackConfig()` + `allSituationIds()` + `rawGanglion()`. |
-| `SituationEvaluator` | Resolves effective threshold from registry before calling `triggerPolicy.evaluate()`. |
-| `SituationExpiryJob` | Calls `OutcomeLedger.removeRecordsBefore()` via `Instance<OutcomeLedger>`. Iterates situations with `FeedbackConfig`, cleans per retention period. |
+| `SituationDefinitionRegistry` | Constructor gains `Instance<FeedbackState>` (passed through to ganglion construction). New `feedbackConfig()` convenience method. New `allSituationIds()` method. |
 | `YamlSituationDefinitionProvider` | Parses `feedback:` + `outcomeGroundTruth:`. |
+
+Note: `DefaultRasTriggerPolicy` and `SituationExpiryJob` are NOT modified.
 
 ## YAML Schema
 
@@ -524,11 +536,13 @@ Contract tests in `api/` test-jar:
 
 Integration tests in `runtime/`:
 - OutcomeRecorder: outcome -> classification -> storage
-- FeedbackAnalyzer: statistics -> drift detection
-- AutomaticFeedbackStrategy: suppression, threshold adjustment, prior updating bounds
-- FeedbackUpdateJob: end-to-end periodic update cycle
-- DefaultRasTriggerPolicy: suppression integration (SUPPRESS decision when within cooldown)
-- NaiveBayesGanglion: adjusted priors applied to new situations
+- FeedbackAnalyzer: statistics windowing
+- DefaultSuppressionStrategy: cooldown-based suppression with pre-queried last dismissal time
+- DefaultTuningStrategy: threshold adjustment, prior updating bounds
+- FeedbackUpdateJob: end-to-end periodic update cycle with tenant isolation
+- FeedbackState: tenant-scoped threshold and prior overrides, concurrent access
+- SituationEvaluator: pre-detection suppression, effective threshold construction
+- NaiveBayesGanglion: tenant-scoped adjusted priors from FeedbackState
 
 ## Dependencies
 
