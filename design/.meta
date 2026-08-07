@@ -1,0 +1,9 @@
+branch: issue-40-ras-feedback-loop
+project-sha: 8cf8268ce4a0dd82942eb34ad6a61d96c4696cbe
+date: 2026-07-30
+issue: 40
+issue-repo: casehubio/casehub-ras
+covers: 40
+flyway-next-v: unknown
+design-repo: project
+design-section-hashes: 
