@@ -1,0 +1,15 @@
+# Work Plan — issue-44-situation-replay
+
+## State
+branch: issue-44-situation-replay
+state: scaffolded
+project-sha: 14ae7ddcb44986dfe95237fe4259bfc4b50467c5
+date: 2026-08-18
+issue-repo: casehubio/casehub-ras
+covers: 44
+design-repo: project
+design-section-hashes: 
+flyway-next-v: none
+
+## Queue
+- [ ] #44 — Issue #44 ← active
