@@ -1,0 +1,15 @@
+# Work Plan — issue-57-rate-threshold-yaml-parsing
+
+## State
+branch: issue-57-rate-threshold-yaml-parsing
+state: scaffolded
+project-sha: 9313512a4184cd9c6abdaf08c5b169d5b86c4671
+date: 2026-08-20
+issue-repo: casehubio/casehub-ras
+covers: 57,55
+design-repo: project
+design-section-hashes: 
+flyway-next-v: none
+
+## Queue
+- [ ] #57 — Issue #57 ← active
