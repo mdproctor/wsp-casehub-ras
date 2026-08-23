@@ -1,7 +1,7 @@
 format_version: 1
-state: CONTEXT_GATHERING
+state: DECISION_CAPTURE
 entered: 2026-08-23T00:00:00Z
-decision_count: 0
+decision_count: 1
 dimensions_completed: 0
 dimensions_total: 0
 ordered: false
