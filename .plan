@@ -13,3 +13,17 @@ flyway-next-v: unknown
 
 ## Queue
 - [ ] casehubio/casehub-ras#41 — Issue #41 ← active
+  - [ ] Batch 1: API Foundation
+    - [ ] Task 1: API types + CloudEvent expression context
+  - [ ] Batch 2: Bridge + Ganglion
+    - [ ] Task 2: SituationChangeEventBridge
+    - [ ] Task 3: SituationWatcherGanglion + registry
+  - [ ] Batch 3: YAML + Cycles
+    - [ ] Task 4: YAML parsing situation-watcher + deadline
+    - [ ] Task 5: Cycle detection
+  - [ ] Batch 4: Deadline
+    - [ ] Task 6: Evaluator trigger extraction + triggerByDeadline
+    - [ ] Task 7: DeadlineCheckJob + store impls
+  - [ ] Batch 5: Replay + Integration
+    - [ ] Task 8: ReplayRunner drainAllDeadlines
+    - [ ] Task 9: Integration tests
