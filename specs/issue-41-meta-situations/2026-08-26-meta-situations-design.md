@@ -97,7 +97,13 @@ Five bridged event types, matching `SituationChangeEvent.ChangeType` enum values
 | `ras.situation.suppressed` | `SUPPRESSED` |
 | `ras.situation.dismissed` | `DISMISSED` |
 
-Per-situation filtering uses `eventFilter` expressions (e.g., `extensions.situationid == 'child-X'`), keeping the type namespace bounded and stable. Adding or removing situation definitions does not change the event type contract.
+Per-situation filtering uses `eventFilter` expressions (e.g., `.situationid == "child-X"`), keeping the type namespace bounded and stable. Adding or removing situation definitions does not change the event type contract.
+
+### CloudEventExpressionContext Update
+
+`CloudEventExpressionContext.build()` must be updated to expose all CloudEvent extensions, not just `tenancyid`. The bridge adds `situationid`, `correlationkey`, and `changetype` as extensions — these must be accessible in eventFilter and correlationKey expressions. The update iterates `event.getExtensionNames()` and adds each extension to the expression context map. This is a general improvement, not meta-situation-specific — it also benefits any future CloudEvent extensions.
+
+Expression access path: flat top-level keys (e.g., `.situationid`, `.correlationkey`), consistent with the existing `.tenancyid` access pattern.
 
 ### Default Correlation
 
@@ -119,7 +125,7 @@ New sealed interface variant in `api/`, alongside `NaiveBayes` and `ExpressionRu
 
 ```yaml
 ganglia:
-  - id: service-health-watcher
+  - ganglionId: service-health-watcher
     type: situation-watcher
     changeTypeMapping:
       triggered: DETECTED
@@ -134,7 +140,7 @@ ganglia:
 1. Extracts `changetype` from the bridged CloudEvent's extensions
 2. Maps to `DetectionSignal` via the configured mapping
 3. Returns `DetectionResult` with the mapped signal and confidence 1.0
-4. Unmapped change types return `NOISE`
+4. Events with unmapped change types are not routed to this ganglion (see handledEventTypes)
 
 ### Automatic Evidence
 
@@ -147,7 +153,9 @@ Ganglion-level `evidenceTemplates` merge on top, following the existing merge or
 
 ### handledEventTypes
 
-`SituationWatcherGanglion.handledEventTypes()` returns the 5 bridged event types (`ras.situation.triggered`, etc.). This is a capability declaration for startup validation — the registry validates that every ganglion referenced by a chain mode can handle at least one of the definition's `eventTypes`.
+`SituationWatcherGanglion.handledEventTypes()` returns only the bridged event types for which `changeTypeMapping` has entries. A ganglion with `{triggered: DETECTED, resolved: ANTI}` returns `{"ras.situation.triggered", "ras.situation.resolved"}`. A ganglion with just `{triggered: DETECTED}` returns `{"ras.situation.triggered"}`.
+
+This ensures correct routing: `SituationEvaluator.gangliaHandlingEventType()` only routes events to ganglia that actually map them, preventing NOISE pollution from unmapped events.
 
 ## Deadline — Temporal Absence
 
@@ -159,28 +167,43 @@ Deadline is a temporal lifecycle property, not a detection pattern. Every existi
 
 Any chain mode can have an optional deadline layered on top. After `firstSignal + deadline` elapses, if the situation hasn't already triggered, resolved, or been discarded, the `DeadlineCheckJob` forces a trigger regardless of chain mode satisfaction.
 
+### Deadline + correlationWindow Interaction
+
+When both are set, `correlationWindow` takes precedence. Before force-triggering, `triggerByDeadline()` checks `context.firstSignal() + definition.correlationWindow() < Instant.now()`. If the correlation window has expired, the situation is discarded instead of triggered — it should have been cleaned up on the next event arrival but no event arrived.
+
 ### SituationDefinition Changes
 
 - New field: `Duration deadline` (`@Nullable`)
 - Validated: positive when set (same pattern as `correlationWindow`)
 - YAML: `deadline: PT30M` (ISO-8601 Duration)
+- `withChainMode()` copy method must carry `deadline` through (all 12 fields)
+- Both convenience constructors pass `null` for `deadline`
 
 ### DeadlineCheckJob
 
 `@Scheduled` bean in `runtime/`.
 
-- Queries `SituationStore` for active situations where the definition has non-null `deadline`
+- Iterates deadline-enabled definitions from the registry (`registry.allSituationIds()` → filter by `definition.deadline() != null`)
+- For each, queries `SituationStore.findActiveBySituationId(situationId)` for active instances
 - Checks `context.firstSignal() + definition.deadline() < Instant.now()`
-- When expired: calls `SituationEvaluator.triggerByDeadline(situationId, correlationKey, tenancyId)` — a new entry point that handles trigger mechanics (claim, case creation, change event, ganglion close) without requiring a `CloudEvent` input
+- When expired: calls `SituationEvaluator.triggerByDeadline(situationId, correlationKey, tenancyId)` — a new entry point that handles trigger mechanics without requiring a `CloudEvent` input
 - Check interval: configurable via `ras.deadline.check-interval` (default `PT10S`)
+
+### triggerByDeadline Implementation
+
+To avoid duplicating the trigger sequence in `executeDecision()`, extract shared trigger mechanics into a private method (e.g., `executeTrigger(SituationContext, SituationDefinition, String, String, String, Instant)`) called by both `executeDecision()` and `triggerByDeadline()`. The shared method handles: claim → save → case trigger → change event → close ganglia, including the subtle ordering (claim-before-save vs save-before-claim based on `storeVersion`), error recovery (reset claim on failure), and metric emission.
 
 ### Dual-Path Evaluation
 
 The event-driven path also checks `firstSignal + deadline < eventTime` on every evaluation for deterministic behaviour when events continue arriving. The scheduled job is a backstop for quiescent situations where no further events arrive.
 
+### Replay Support
+
+`SituationReplayRunner` needs a `drainAllDeadlines(Instant endOfReplayWindow)` method that checks all active situations for expired deadlines at a given replay timestamp. Without this, deadlines that expire after the last replayed event but before the replay window ends would be missed. `drainAllDeadlines()` is called after `drainAllBuffers()` at the end of replay.
+
 ### SituationStore Impact
 
-New query method: `List<SituationContext> findActiveBySituationId(String situationId)` — returns all active situation instances for a given situation definition. The `DeadlineCheckJob` iterates deadline-enabled definitions from the registry (`registry.allSituationIds()` → filter by `definition.deadline() != null`), then queries the store by situationId. JPA implementation adds an indexed query on `situation_id` where `triggered_at IS NULL`. In-memory implementation filters the existing map.
+New query method: `List<SituationContext> findActiveBySituationId(String situationId)` — returns all active situation instances for a given situation definition. The `DeadlineCheckJob` iterates deadline-enabled definitions from the registry, then queries the store by situationId. JPA implementation adds an indexed query on `situation_id` where `triggered_at IS NULL`. In-memory implementation filters the existing map.
 
 ## Cycle Detection
 
@@ -194,11 +217,32 @@ Build a directed graph:
 
 Every registered situation can produce 5 bridged change types. An edge exists from S₁ to S₂ if S₂'s `eventTypes` contains any bridged type. The graph has at most N×5 edges — tractable for any realistic deployment.
 
-Standard DFS cycle detection on `register()`. If adding a definition would create a cycle, `register()` throws `IllegalArgumentException`. `deregister()` removes edges — no cycle check needed.
+### Self-Edge Handling
+
+A meta-situation subscribing to `ras.situation.triggered` creates a self-edge (it can also produce that type when it triggers). Self-edges are handled by trigger mode:
+
+- **FireOnce:** Self-edges are excluded from cycle detection. After triggering, the situation context is cleaned up (`store.remove()`, ganglia closed). If the meta-situation's own bridged trigger event arrives post-cleanup, it starts a fresh context that won't re-trigger from a single event (chain modes require sufficient detections).
+- **Repeating:** Self-edges are included. A repeating meta-situation with `Count(ganglionId, 1)` would genuinely self-loop — each trigger produces a bridged event that re-triggers.
+
+### Constructor Phase 3
+
+Cycle detection also runs during `SituationDefinitionRegistry`'s constructor Phase 3 (initial YAML/CDI registration). The cycle graph is built incrementally as each registration is processed — each new definition is checked against the graph so far before being added.
+
+### Dynamic Registration
+
+`register()` checks cycles before adding. `deregister()` removes edges — no cycle check needed (removing nodes can only break cycles, not create them).
 
 ### EventFilter Conservatism
 
-EventFilters are treated as transparent for cycle detection. A definition filtering on `situationid == 'child-X'` still creates edges from all situations. This may produce false-positive rejections but never false negatives. Conservative safety is correct for mandatory validation.
+EventFilters are treated as transparent for cycle detection. A definition filtering on `.situationid == "child-X"` still creates edges from all situations. This may produce false-positive rejections but never false negatives. Conservative safety is correct for mandatory validation.
+
+## Sequence Chain Mode Limitation
+
+CDI `fireAsync()` makes no ordering guarantees across independent calls. If child A triggers at T=1 and child B triggers at T=2, their bridged CloudEvents may arrive at `RasEngine` in any order (especially with the separate bridge executor pool).
+
+`DefaultRasTriggerPolicy.evaluateSequence()` sorts detections by `eventTime` (`TimestampedDetection.eventTime()`), and the bridge stamps the CloudEvent `time` field with `Instant.now()`. For events with sufficient temporal separation, ordering is preserved. For near-simultaneous triggers (sub-millisecond), clock precision and thread scheduling could swap order.
+
+Recommendation: prefer `And` over `Sequence` for meta-situations when strict ordering is not required. Document this as a known limitation.
 
 ## YAML Examples
 
@@ -206,7 +250,7 @@ EventFilters are treated as transparent for cycle detection. A definition filter
 
 ```yaml
 ganglia:
-  - id: service-trigger-watcher
+  - ganglionId: service-trigger-watcher
     type: situation-watcher
     changeTypeMapping:
       triggered: DETECTED
@@ -235,16 +279,22 @@ situations:
 
 ### SLA breach (deadline temporal absence)
 
+The SLA breach pattern uses Threshold with ANTI cancellation and a deadline backstop. The trigger-watcher adds confidence on child TRIGGERED events. The resolve-watcher subtracts confidence on child RESOLVED events (ANTI). The threshold is set high enough that events alone cannot satisfy it — only the deadline can force the trigger.
+
+When a child resolves before the deadline, the ANTI detection reduces accumulated confidence. At deadline expiry, `DeadlineCheckJob` invokes `triggerByDeadline()` which fires regardless of chain mode state — but if the situation was already resolved/discarded by event-driven evaluation, no trigger occurs.
+
+**Known gap:** There is currently no mechanism for a cancel event (child resolution) to proactively resolve/discard the pending meta-situation. The Threshold ANTI reduces confidence but does not trigger RESOLVE/DISCARD. A cancel-on-resolution mechanism (e.g., policy returning RESOLVE when accumulated confidence drops to zero or below) is a follow-on enhancement.
+
 ```yaml
 ganglia:
-  - id: trigger-watcher
+  - ganglionId: trigger-watcher
     type: situation-watcher
     changeTypeMapping:
       triggered: DETECTED
-  - id: resolve-watcher
+  - ganglionId: resolve-watcher
     type: situation-watcher
     changeTypeMapping:
-      resolved: DETECTED
+      resolved: ANTI
 
 situations:
   - situationId: sla-breach
@@ -258,9 +308,11 @@ situations:
       expression: "(.tenancyid + \"/\" + .correlationkey)"
       language: jq
     chainMode:
-      type: and
-      requiredGanglia:
+      type: threshold
+      ganglia:
         - trigger-watcher
+        - resolve-watcher
+      minConfidence: 999.0
     deadline: PT30M
     triggerAction:
       type: create-case
@@ -279,7 +331,7 @@ situations:
       - io.casehub.service.error
     chainMode:
       type: and
-      requiredGanglia:
+      ganglia:
         - service-trigger-watcher
         - error-code-detector
     correlationKey:
@@ -303,7 +355,9 @@ situations:
 | `SituationWatcherGanglion` | `runtime/` | Concrete ganglion |
 | `DeadlineCheckJob` | `runtime/` | `@Scheduled` bean |
 | `SituationEvaluator.triggerByDeadline()` | `runtime/` | New evaluator entry point |
-| Cycle detection in `register()` | `runtime/` | Registry validation |
+| `SituationEvaluator.executeTrigger()` | `runtime/` | Extracted shared trigger mechanics |
+| `CloudEventExpressionContext` update | `runtime/` | Expose all extensions |
+| Cycle detection in `register()` + constructor | `runtime/` | Registry validation |
 | JPA deadline query | `persistence-jpa/` | Store implementation |
 | InMemory deadline query | `persistence-memory/` | Store implementation |
 | Flyway migration | `persistence-jpa/` | Add `deadline` column |
@@ -325,16 +379,21 @@ Existing metrics (`ras.event.received`, `ras.event.routed`, `ras.evaluation.*`) 
 | Test | Scope | Verifies |
 |------|-------|----------|
 | `SituationChangeEventBridgeTest` | Unit | CloudEvent shape, extensions, data serialization, exception isolation |
-| `SituationWatcherGanglionTest` | Unit | ChangeType → DetectionSignal mapping, unmapped types → NOISE, automatic evidence |
-| `CycleDetectionTest` | Unit | Direct cycles, transitive cycles, DAG acceptance, filter conservatism, deregister idempotence |
-| `DeadlineCheckJobTest` | Unit | Finds expired situations, calls triggerByDeadline, respects interval, skips triggered |
-| `SituationEvaluator.triggerByDeadline()` | Unit | Trigger mechanics without CloudEvent — claim, case creation, change event, ganglion close |
+| `SituationWatcherGanglionTest` | Unit | ChangeType → DetectionSignal mapping, unmapped types not routed, automatic evidence |
+| `CycleDetectionTest` | Unit | Direct cycles, transitive cycles, DAG acceptance, self-edge exclusion for FireOnce, self-edge inclusion for Repeating, filter conservatism, constructor-time detection |
+| `DeadlineCheckJobTest` | Unit | Finds expired situations, calls triggerByDeadline, respects interval, skips triggered, correlationWindow precedence over deadline |
+| `SituationEvaluator.triggerByDeadline()` | Unit | Shared trigger mechanics — claim, case creation, change event, ganglion close |
+| `CloudEventExpressionContextTest` | Unit | All extensions exposed, not just tenancyid |
 | `MetaSituationIntegrationTest` | Integration | End-to-end: child CloudEvent → child trigger → bridge → meta-situation evaluates → meta-situation triggers |
 | `DeadlineIntegrationTest` | Integration | Child triggers → meta-situation created → deadline expires → job forces trigger |
 | `NestingIntegrationTest` | Integration | L1 meta-situation triggers → bridge → L2 meta-meta-situation evaluates |
 | `AbstractGanglionContractTest` | Contract | SituationWatcherGanglion satisfies Ganglion contract |
-| `YamlSituationDefinitionProvider` | Unit | Parses `situation-watcher` type, `deadline` field, bridged event types |
-| `SituationReplayRunner` | Unit | Deadline doesn't break replay determinism |
+| `YamlSituationDefinitionProvider` | Unit | Parses `situation-watcher` type, `deadline` field, `ganglionId` key |
+| `SituationReplayRunner` | Unit | `drainAllDeadlines(Instant)` fires expired deadlines at replay end |
+
+## Known Gaps
+
+1. **Cancel-on-resolution:** No mechanism for a cancel event to proactively resolve/discard a pending deadline situation. Threshold ANTI reduces confidence but does not trigger RESOLVE/DISCARD. Follow-on: extend `DefaultRasTriggerPolicy` to return RESOLVE when accumulated confidence drops to zero or below for deadline-enabled situations.
 
 ## References
 
@@ -345,6 +404,7 @@ Existing metrics (`ras.event.received`, `ras.event.routed`, `ras.evaluation.*`) 
 - `DefaultRasTriggerPolicy.java:23` — policy evaluation pattern
 - `SituationDefinition.java:13` — `correlationWindow` precedent for temporal fields
 - `SituationReplayRunner.java:31` — deterministic replay depends on ChainMode purity
+- `CloudEventExpressionContext` — must be updated to expose all extensions (R1-02)
 - `DefaultCorrelationKeyExtractor.java` — subject → correlationKey mapping
 - `SituationChangeEvent.java:6` — record fields
 - `GE-20260730-d54a8f` — CDI `fireAsync().join()` exception propagation asymmetry
