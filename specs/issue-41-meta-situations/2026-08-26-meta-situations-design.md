@@ -180,7 +180,7 @@ The event-driven path also checks `firstSignal + deadline < eventTime` on every 
 
 ### SituationStore Impact
 
-New query method: `List<SituationContext> findWithDeadline(Instant cutoff)` (or similar). JPA implementation adds an indexed query joining on definitions with non-null deadline. In-memory implementation scans.
+New query method: `List<SituationContext> findActiveBySituationId(String situationId)` — returns all active situation instances for a given situation definition. The `DeadlineCheckJob` iterates deadline-enabled definitions from the registry (`registry.allSituationIds()` → filter by `definition.deadline() != null`), then queries the store by situationId. JPA implementation adds an indexed query on `situation_id` where `triggered_at IS NULL`. In-memory implementation filters the existing map.
 
 ## Cycle Detection
 
@@ -298,7 +298,7 @@ situations:
 |----------|--------|-----------|
 | `GanglionDescriptor.SituationWatcher` | `api/` | Sealed interface variant |
 | `SituationDefinition.deadline` field | `api/` | Definition record field |
-| `SituationStore.findWithDeadline()` | `api/` | SPI query method |
+| `SituationStore.findActiveBySituationId()` | `api/` | SPI query method for deadline job |
 | `SituationChangeEventBridge` | `runtime/` | CDI observer + producer |
 | `SituationWatcherGanglion` | `runtime/` | Concrete ganglion |
 | `DeadlineCheckJob` | `runtime/` | `@Scheduled` bean |

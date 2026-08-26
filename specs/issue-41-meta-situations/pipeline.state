@@ -1,5 +1,5 @@
 format_version: 1
-state: SPEC_SELF_REVIEW
+state: POST_SPEC_REVIEW
 entered: 2026-08-26T00:00:00Z
 decision_count: 5
 dimensions_completed: 0
