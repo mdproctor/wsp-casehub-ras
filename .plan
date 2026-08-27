@@ -15,9 +15,9 @@ flyway-next-v: unknown
 - [ ] casehubio/casehub-ras#41 — Issue #41 ← active
   - [x] Batch 1: API Foundation
     - [x] Task 1: API types + CloudEvent expression context
-  - [ ] Batch 2: Bridge + Ganglion
-    - [ ] Task 2: SituationChangeEventBridge
-    - [ ] Task 3: SituationWatcherGanglion + registry
+  - [x] Batch 2: Bridge + Ganglion
+    - [x] Task 2: SituationChangeEventBridge
+    - [x] Task 3: SituationWatcherGanglion + registry
   - [ ] Batch 3: YAML + Cycles
     - [ ] Task 4: YAML parsing situation-watcher + deadline
     - [ ] Task 5: Cycle detection
