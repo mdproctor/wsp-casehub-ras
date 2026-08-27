@@ -19,7 +19,7 @@ flyway-next-v: unknown
     - [x] Task 2: SituationChangeEventBridge
     - [x] Task 3: SituationWatcherGanglion + registry
   - [ ] Batch 3: YAML + Cycles
-    - [ ] Task 4: YAML parsing situation-watcher + deadline
+    - [x] Task 4: YAML parsing situation-watcher + deadline
     - [ ] Task 5: Cycle detection
   - [ ] Batch 4: Deadline
     - [ ] Task 6: Evaluator trigger extraction + triggerByDeadline
