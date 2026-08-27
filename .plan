@@ -18,12 +18,12 @@ flyway-next-v: unknown
   - [x] Batch 2: Bridge + Ganglion
     - [x] Task 2: SituationChangeEventBridge
     - [x] Task 3: SituationWatcherGanglion + registry
-  - [ ] Batch 3: YAML + Cycles
+  - [x] Batch 3: YAML + Cycles
     - [x] Task 4: YAML parsing situation-watcher + deadline
-    - [ ] Task 5: Cycle detection
-  - [ ] Batch 4: Deadline
-    - [ ] Task 6: Evaluator trigger extraction + triggerByDeadline
-    - [ ] Task 7: DeadlineCheckJob + store impls
-  - [ ] Batch 5: Replay + Integration
-    - [ ] Task 8: ReplayRunner drainAllDeadlines
-    - [ ] Task 9: Integration tests
+    - [x] Task 5: Cycle detection
+  - [x] Batch 4: Deadline
+    - [x] Task 6: Evaluator trigger extraction + triggerByDeadline
+    - [x] Task 7: DeadlineCheckJob + store impls
+  - [x] Batch 5: Replay + Integration
+    - [x] Task 8: ReplayRunner drainAllDeadlines
+    - [x] Task 9: Integration tests
