@@ -2,7 +2,7 @@
 
 ## State
 branch: issue-41-meta-situations
-state: scaffolded
+state: active
 project-sha: bb7bdc2e2609fff99937164dc2eb6be28919c694
 date: 2026-08-23
 issue-repo: casehubio/casehub-ras
@@ -13,8 +13,8 @@ flyway-next-v: unknown
 
 ## Queue
 - [ ] casehubio/casehub-ras#41 — Issue #41 ← active
-  - [ ] Batch 1: API Foundation
-    - [ ] Task 1: API types + CloudEvent expression context
+  - [x] Batch 1: API Foundation
+    - [x] Task 1: API types + CloudEvent expression context
   - [ ] Batch 2: Bridge + Ganglion
     - [ ] Task 2: SituationChangeEventBridge
     - [ ] Task 3: SituationWatcherGanglion + registry
