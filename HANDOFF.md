@@ -1,36 +1,20 @@
 # HANDOFF — casehub-ras
 
-**Date:** 2026-08-07
-**Issues:** #40 (closed)
+## Last Session
 
-## What was done
+Designed and began implementing meta-situations (#41). Brainstorming produced 5 decisions (bridge architecture, deadline as definition field not ChainMode, situationId as subject, per-ChangeType event types, unlimited nesting). Standard decision review revised 3, surfaced 2 new. Light spec review caught 12 findings including cycle detection self-edges and CloudEventExpressionContext not exposing bridge extensions — all addressed. Implementation reached 5/9 tasks: API types, CloudEventExpressionContext, SituationChangeEventBridge, SituationWatcherGanglion + registry construction, YAML parsing for situation-watcher + deadline.
 
-Closed #40 on branch `issue-40-ras-feedback-loop` (a1ca741). Implemented the
-full RAS feedback loop — case outcomes feed back into detection tuning. Three-layer
-composable pipeline: OutcomeRecorder (CaseOutcomeObserver ingestion), FeedbackAnalyzer
-(batch statistics), FeedbackUpdateJob (scheduled threshold/prior adjustment). Advisory
-mode (suppression + metrics) default; tuning mode adds automatic NaiveBayes prior
-recalibration via outcomeGroundTruth mapping and ChainMode.Threshold drift. JPA
-persistence via V7 Flyway migration. YAML parsing for `feedback:` section and
-`outcomeGroundTruth:`. Code review caught @Scheduled overlap risk (fixed with
-ConcurrentExecution.SKIP). Garden entries: branch-drift variant (GE-20260522-543863
-revised), Hibernate native MAX timestamp gotcha (GE-20260807-66fe1b).
+## Immediate Next Step
 
-## Key decisions
+Task 6: cycle detection in SituationDefinitionRegistry — DFS graph validation at registration time. Self-edges excluded for FireOnce, included for Repeating. Must run in both constructor Phase 3 and dynamic `register()`.
 
-- Suppression in SituationEvaluator, not DefaultRasTriggerPolicy (policy purity preserved)
-- FeedbackState separated from SituationDefinitionRegistry (mutable vs immutable)
-- Log-space prior boundary at applyPriorOverride() (raw-to-log conversion at API boundary)
-- Advisory mode default (tuningEnabled: false) — suppression active, tuning opt-in
-- JPQL for typed aggregate queries, native SQL only for ON CONFLICT and bulk DELETE
+## Garden Entries Consulted
 
-## What's next
+GE-20260730-d54a8f — CDI fireAsync().join() exception propagation (HIGHLY_RELEVANT)
 
-| # | Description | Scale | Complexity | Notes |
-|---|-------------|-------|------------|-------|
-| #41 | Meta-situations | L | High | Situations observing other situations |
-| #44 | Situation replay | M | Med | Validate definitions against historical events |
-| #45 | Adaptive thresholds | L | High | Self-tuning; builds on #40 feedback loop |
-| #29 | DroolsSessionStore journal-based reliability | L | High | Replaces experimental H2MVStore |
-| #30 | DroolsSessionStore clustered session sharing | L | High | Needs networked backend |
-| #5 | Platform stream infrastructure | XL | High | Epic, lives in casehub-platform |
+## References
+
+- Design spec: `specs/issue-41-meta-situations/2026-08-26-meta-situations-design.md`
+- Decisions: `specs/issue-41-meta-situations/decisions.md`
+- Implementation plan: `plans/2026-08-27-meta-situations.md`
+- Journal: `JOURNAL.md`

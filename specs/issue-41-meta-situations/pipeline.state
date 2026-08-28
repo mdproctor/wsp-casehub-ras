@@ -1,0 +1,14 @@
+format_version: 1
+state: PLANNING
+entered: 2026-08-27T00:00:00Z
+decision_count: 5
+dimensions_completed: 1
+dimensions_total: 1
+ordered: false
+dimensions_done: structure
+current_dimension:
+workspace_structure:
+workspace_coherence:
+workspace_robustness:
+workspace_crosscutting:
+workspace_decision:
