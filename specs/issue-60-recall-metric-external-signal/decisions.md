@@ -15,7 +15,7 @@
 
 ## D2: Signal granularity
 
-**Choice:** Situation-level first — missed detection signal specifies situationId + correlationKey + tenancyId + time window
+**Choice:** Situation-level first — missed detection signal specifies situationId + correlationKey + tenancyId + eventTime
 **Alternatives:**
 - All three granularities from day one (situation + ganglion + event) — more API surface to stabilise
 - Event-level first (submit CloudEvent for replay) — heaviest, requires replay infrastructure
@@ -23,7 +23,7 @@
 **Trade-offs:** Cannot compute per-ganglion recall until ganglion-level signals are added. Operators whose situations use compound or derived correlation keys (e.g., hash of multiple event attributes) need to understand the key format — the REST API should document the correlation key schema per situation definition.
 **Sources:** OutcomeRecord.java, SituationDefinition.java, CloudEvent correlation key extraction
 **Exploration:** quick
-**Status:** revised (R1-04: removed false OutcomeLedger tuple mapping claim; clarified correlationKey is domain-level in most deployments)
+**Status:** revised (R1-04: removed false OutcomeLedger tuple mapping claim; clarified correlationKey is domain-level. R2-02: renamed "time window" to eventTime — the operator specifies when the missed event occurred, not a range)
 
 ## D3: Ingestion architecture
 
@@ -32,11 +32,11 @@
 - Parallel MissedDetectionLedger SPI + CDI event (original) — creates cross-store join problem for recall computation: TP from OutcomeLedger + FN from MissedDetectionLedger requires aligned time windows across two stores; more surface area (new SPI, event type, observer, persistence layer) for no architectural benefit
 - Extend OutcomeRecord with source discriminator and nullable caseId — breaks OutcomeRecord's non-null contract (`Objects.requireNonNull(caseId)`); requires sentinel values; existing dedup on caseId (UNIQUE constraint, `seenCaseIds` set in InMemoryOutcomeLedger) doesn't apply to missed detections; forces every OutcomeRecord consumer to handle the nullable case
 - REST endpoint only — correct as the first external API, but skips the internal SPI extension that makes the store queryable
-**Rationale:** Precision and recall are two projections of the same confusion matrix. They should be computed from a single data source within a single time window. `OutcomeLedger` gains `recordMissed(MissedDetectionRecord)` for storage and `statistics()` returns an extended `OutcomeStatistics` including `missedCount`. `MissedDetectionRecord` is a separate record type — missed detections have different fields (no caseId, no outcomeLabel, a reportId for dedup, reportedBy for audit) — but stored in the same ledger and queryable through the same statistics interface. `OutcomeRecord` is unchanged: its non-null contract, dedup semantics, and all existing consumers are preserved.
+**Rationale:** Precision and recall are two projections of the same confusion matrix. They should be computed from a single data source within a single time window. `OutcomeLedger` gains `recordMissed(MissedDetectionRecord)` for storage and `statistics()` returns an extended `OutcomeStatistics` including `missedCount`. `MissedDetectionRecord` is a separate record type with fields: `situationId`, `correlationKey`, `tenancyId`, `eventTime` (when the missed event occurred — operator-specified), `reportedBy` (operator identity for audit), `UUID reportId` (dedup key), `Instant recordedAt` (system-generated timestamp of when the report was filed). Stored in the same ledger, queryable through the same statistics interface. `OutcomeRecord` is unchanged: its non-null contract, dedup semantics, and all existing consumers are preserved.
 **Depends on:** D2 (signal granularity determines MissedDetectionRecord fields)
 **Sources:** OutcomeLedger.java, OutcomeRecord.java, QualityMetrics.java, InMemoryOutcomeLedger.java (caseId dedup), JpaOutcomeLedger.java (ON CONFLICT case_id)
 **Exploration:** quick
-**Status:** revised (R1-02: unified store eliminates cross-store join; separate MissedDetectionRecord preserves OutcomeRecord contract)
+**Status:** revised (R1-02: unified store eliminates cross-store join; separate MissedDetectionRecord preserves OutcomeRecord contract. R2-02: fields clarified — eventTime replaces reportedAt, recordedAt added for audit)
 
 ## D4: Tuning interaction
 
@@ -64,29 +64,29 @@
 
 ## D6: Recall computation
 
-**Choice:** `recall()` on `QualityMetrics` as `confirmedCount / (double)(confirmedCount + missedCount)`, using the same `retentionPeriod` time window as precision. Surfaced as `ras.feedback.recall` gauge per (situationId, tenancyId). No F1 score gauge initially.
+**Choice:** `recall()` on `OutcomeStatistics` (not on `QualityMetrics`) as `confirmedCount / (double)(confirmedCount + missedCount)`, using the same `retentionPeriod` time window as precision. Surfaced as `ras.feedback.recall` gauge per (situationId, tenancyId). No F1 score gauge initially.
 **Alternatives:**
 - Separate retention window for recall — makes precision and recall non-comparable: the TP count in recall's numerator would differ from the TP count in precision's numerator because they span different time ranges
 - F1 score gauge from day one — premature; operators can compute F1 externally from precision and recall gauges; adding F1 is a one-line change when needed
 - Per-ganglion recall — impossible with situation-level missed detection signals (D2); ganglion-level signals would be needed, which is a future enrichment on D2
-**Rationale:** Using the same `FeedbackConfig.retentionPeriod()` time window ensures TP counts are identical in precision and recall computations, making the two metrics directly comparable. Recall computation lives in `QualityMetrics.recall()` as a default method, computed from `OutcomeStatistics` returned by `FeedbackAnalyzer` → `OutcomeLedger.statistics()` — no new query path. `FeedbackMetrics.recordStatistics()` gains the recall gauge. Per-ganglion recall requires ganglion-level missed detection signals and is deferred to a future enrichment of D2.
+**Rationale:** Using the same `FeedbackConfig.retentionPeriod()` time window ensures TP counts are identical in precision and recall computations, making the two metrics directly comparable. `recall()` is a method on `OutcomeStatistics` directly — NOT a default method on `QualityMetrics`. `QualityMetrics` is implemented by both `OutcomeStatistics` (situation-level) and `GanglionOutcomeStatistics` (per-ganglion). Per-ganglion missed detection data does not exist (D2 is situation-level only), so a `recall()` default on the interface would return `confirmedCount / (confirmedCount + 0)` = 1.0 for any ganglion with confirmed outcomes — semantically wrong (implies perfect recall when actually no data exists). For `OutcomeStatistics`, `missedCount == 0` means "no misses reported" (metric accurate given available data); for `GanglionOutcomeStatistics`, it would mean "measurement impossible" — categorically different. `recall()` returns NaN when `confirmedCount + missedCount == 0` (no decisive data), consistent with `precision()`'s NaN convention. Computed from `OutcomeStatistics` returned by `FeedbackAnalyzer` → `OutcomeLedger.statistics()` — no new query path. `FeedbackMetrics.recordStatistics()` gains the recall gauge; NaN suppresses gauge registration via the existing convention in `FeedbackMetrics.setGauge()`. When ganglion-level signals are added in a future enrichment of D2, `recall()` can be promoted to the `QualityMetrics` interface.
 **Trade-offs:** Per-ganglion recall deferred. No F1 gauge — operators compute externally. Same time window means a burst of missed detection reports within the window can temporarily deflate recall even if the underlying detection rate hasn't changed.
 **Sources:** QualityMetrics.java, OutcomeStatistics.java, FeedbackMetrics.java, FeedbackAnalyzer.java, issue #40 requirement 4
 **Exploration:** quick (surfaced by reviewer R1-05)
-**Status:** captured
+**Status:** revised (R2-01: recall() placed on OutcomeStatistics, not QualityMetrics — prevents misleading 1.0 recall on GanglionOutcomeStatistics)
 
 ## D7: Missed detection validation
 
-**Choice:** Validate on ingestion: (1) situation definition exists in `SituationDefinitionRegistry`, (2) `reportedAt` within `retentionPeriod` of the situation's `FeedbackConfig`, (3) deduplication on composite key `(situationId, correlationKey, tenancyId, reportedAt)` — duplicate reports for the same miss are idempotent
+**Choice:** Validate on ingestion: (1) situation definition exists in `SituationDefinitionRegistry`, (2) `eventTime` within `retentionPeriod` of the situation's `FeedbackConfig`, (3) deduplication on composite key `(situationId, correlationKey, tenancyId, eventTime)` — duplicate reports for the same miss are idempotent
 **Alternatives:**
 - No validation — inflated FN count from duplicates and out-of-window reports; recall metric becomes unreliable
 - Cross-reference `SituationQueryService.history()` to verify the event wasn't actually detected — conceptually correct but couples the ingestion path to the query SPI, adds query latency on every report, and the absence of a trigger record doesn't prove a miss (the event store may have been cleaned up by `SituationExpiryJob`)
 - Full validation (situation exists + trigger didn't happen + temporal bounds + operator identity + rate limiting) — maximum correctness but heaviest; trigger-history check is the most valuable addition but has the caveats above
-**Rationale:** Essential validations prevent data quality problems that directly corrupt the recall metric. Situation existence is a cheap `SituationDefinitionRegistry` lookup. Temporal bounds prevent operators from reporting misses outside the retention window (records would be cleaned up by `FeedbackUpdateJob` immediately anyway). Deduplication on the composite key prevents the same miss reported N times from deflating recall N-fold — the composite key captures "this specific situation should have fired for this correlation at this time." Cross-referencing trigger history is deferred: operators reporting misses are asserting a fact about the real world based on domain knowledge the system doesn't have; the system should record the assertion, not second-guess it.
+**Rationale:** Essential validations prevent data quality problems that directly corrupt the recall metric. Situation existence is a cheap `SituationDefinitionRegistry` lookup. Temporal bounds prevent operators from reporting misses outside the retention window (records would be cleaned up by `FeedbackUpdateJob` immediately anyway). Deduplication on the composite key prevents the same miss reported N times from deflating recall N-fold — the composite key captures "this specific situation should have fired for this correlation at this event time." Cross-referencing trigger history is deferred: operators reporting misses are asserting a fact about the real world based on domain knowledge the system doesn't have; the system should record the assertion, not second-guess it.
 **Trade-offs:** Without trigger-history cross-reference, an operator can report a "miss" for something that was actually detected (operator error inflates FN, deflates recall). Acceptable for initial implementation — the epistemological limitation of operator reporting already bounds metric accuracy far more than operator errors do.
 **Sources:** SituationDefinitionRegistry, SituationQueryService.java, FeedbackConfig.retentionPeriod(), OutcomeLedger dedup patterns
 **Exploration:** quick (surfaced by reviewer R1-07)
-**Status:** captured
+**Status:** revised (R2-02: dedup key uses eventTime instead of reportedAt — event occurrence time, not report-filing time)
 
 ## D8: Drift direction classification
 
