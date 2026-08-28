@@ -2,7 +2,7 @@
 
 ## State
 branch: issue-41-meta-situations
-state: closing:promoted
+state: closing:stamped
 project-sha: bb7bdc2e2609fff99937164dc2eb6be28919c694
 date: 2026-08-23
 issue-repo: casehubio/casehub-ras
