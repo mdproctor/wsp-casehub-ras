@@ -1,7 +1,7 @@
 format_version: 1
-state: CLARIFYING_QUESTIONS
-entered: 2026-08-28T04:15:00Z
-decision_count: 0
+state: DECISION_REVIEW
+entered: 2026-08-28T04:25:00Z
+decision_count: 5
 dimensions_completed: 0
 dimensions_total: 0
 ordered: false
