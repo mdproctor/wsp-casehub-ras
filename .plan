@@ -2,7 +2,7 @@
 
 ## State
 branch: issue-41-meta-situations
-state: active
+state: closing:promoted
 project-sha: bb7bdc2e2609fff99937164dc2eb6be28919c694
 date: 2026-08-23
 issue-repo: casehubio/casehub-ras
@@ -11,19 +11,6 @@ design-repo: project
 design-section-hashes: 
 flyway-next-v: unknown
 
+evidence-era: true
 ## Queue
-- [ ] casehubio/casehub-ras#41 — Issue #41 ← active
-  - [x] Batch 1: API Foundation
-    - [x] Task 1: API types + CloudEvent expression context
-  - [x] Batch 2: Bridge + Ganglion
-    - [x] Task 2: SituationChangeEventBridge
-    - [x] Task 3: SituationWatcherGanglion + registry
-  - [x] Batch 3: YAML + Cycles
-    - [x] Task 4: YAML parsing situation-watcher + deadline
-    - [x] Task 5: Cycle detection
-  - [x] Batch 4: Deadline
-    - [x] Task 6: Evaluator trigger extraction + triggerByDeadline
-    - [x] Task 7: DeadlineCheckJob + store impls
-  - [x] Batch 5: Replay + Integration
-    - [x] Task 8: ReplayRunner drainAllDeadlines
-    - [x] Task 9: Integration tests
+- [x] casehubio/casehub-ras#41 — Issue #41
