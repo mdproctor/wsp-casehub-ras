@@ -1,6 +1,6 @@
 format_version: 1
-state: DECISION_CAPTURE
-entered: 2026-08-29T10:30:00Z
+state: DECISION_REVISION
+entered: 2026-08-29T11:00:00Z
 decision_count: 8
 dimensions_completed: 0
 dimensions_total: 0
