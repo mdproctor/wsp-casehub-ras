@@ -13,3 +13,9 @@ flyway-next-v: unknown
 
 ## Queue
 - [ ] casehubio/casehub-ras#60 — Issue #60 ← active
+  - [ ] Batch 1: API Foundation
+    - [ ] Task 1: API types + InMemory impl + contract tests
+  - [ ] Batch 2: Ingestion + Metrics
+    - [ ] Task 2: MissedDetectionRecorder + recall gauge + FeedbackUpdateJob
+  - [ ] Batch 3: JPA + REST
+    - [ ] Task 3: Flyway V9 + JpaOutcomeLedger + REST endpoint
