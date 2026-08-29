@@ -2,7 +2,7 @@
 
 ## State
 branch: issue-60-recall-metric-external-signal
-state: closing:review
+state: closing:promoted
 project-sha: 80d4881ef787ce9d9550cd694b85f4ef3f745ab0
 date: 2026-08-28
 issue-repo: casehubio/casehub-ras
