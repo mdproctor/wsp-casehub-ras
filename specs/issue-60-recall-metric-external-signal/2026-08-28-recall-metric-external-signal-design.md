@@ -57,10 +57,14 @@ Two deduplication mechanisms at different levels:
 New required method on existing SPI:
 
 ```java
-void recordMissed(MissedDetectionRecord record);
+boolean recordMissed(MissedDetectionRecord record);
 ```
 
-Required, not default. There are exactly two implementations (`InMemoryOutcomeLedger`, `JpaOutcomeLedger`), both in-project. A default-throws would be a backward-compatibility shim — the platform has no external callers. Compile-time enforcement is strictly better than a runtime `UnsupportedOperationException`.
+Returns `true` if a new record was stored, `false` if deduplicated (composite key or `reportId` conflict). `MissedDetectionRecorder` uses this to return 201 vs 200 from the REST endpoint and to increment `ras.feedback.missed` only on genuinely new records.
+
+The existing `record()` remains `void` — its caller (`OutcomeRecorder`) is a CDI event observer with no response semantics and no selective counter. The asymmetry is intentional: different callers, different requirements.
+
+Required, not default. There are exactly two implementations (`InMemoryOutcomeLedger`, `JpaOutcomeLedger`), both in-project. Compile-time enforcement is strictly better than a runtime `UnsupportedOperationException`.
 
 ### statistics() Extension
 
@@ -170,11 +174,11 @@ Error codes: `UNKNOWN_SITUATION`, `FEEDBACK_NOT_CONFIGURED`, `EVENT_OUTSIDE_WIND
 
 `MissedDetectionRecorder` in `runtime/` — mirrors `OutcomeRecorder`'s pattern (thin adapter → validation → ledger storage). The REST resource delegates to this service. The service:
 
-1. Validates the request (see Validation below)
+1. Validates the request (see Validation below) — rejects with counter increment on failure
 2. Sets `recordedAt` to `Instant.now()`
-3. Calls `OutcomeLedger.recordMissed()`
-4. Increments `ras.feedback.missed` counter on success
-5. Increments `ras.feedback.missed.rejected` counter on validation failure
+3. Calls `OutcomeLedger.recordMissed()` — returns `true` (new) or `false` (duplicate)
+4. Increments `ras.feedback.missed` counter only when `recordMissed()` returns `true`
+5. Returns the new/duplicate status to the REST resource for 201 vs 200
 
 This separation keeps the REST resource thin (HTTP concerns only) and the ingestion logic independently testable. `MissedDetectionRecorder` is the integration point for all signal sources — future adapters (batch import, streaming consumer) call it directly, not the REST resource or `OutcomeLedger.recordMissed()`.
 
@@ -200,7 +204,7 @@ Validation that the situation wasn't actually detected (cross-referencing `Situa
 **Increment locations:**
 
 - `ras.feedback.recall` — gauge pushed by `FeedbackUpdateJob` via `FeedbackMetrics.recordStatistics()`, alongside precision and noise rate
-- `ras.feedback.missed` — counter incremented by `MissedDetectionRecorder` on successful `recordMissed()` call
+- `ras.feedback.missed` — counter incremented by `MissedDetectionRecorder` when `recordMissed()` returns `true` (new record, not duplicate)
 - `ras.feedback.missed.rejected` — counter incremented by `MissedDetectionRecorder` when validation rejects a report
 
 Existing gauges (`ras.feedback.precision`, `ras.feedback.noise_rate`) are unchanged. `FeedbackUpdateJob` pushes recall alongside them.
