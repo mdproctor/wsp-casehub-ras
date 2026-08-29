@@ -1,0 +1,15 @@
+# Work Plan — issue-62-drift-recall-quality
+
+## State
+branch: issue-62-drift-recall-quality
+state: scaffolded
+project-sha: 2d1b6e33543bec9e555804dfaa849a53910ca6ba
+date: 2026-08-29
+issue-repo: casehubio/casehub-ras
+covers: 62,63,64
+design-repo: project
+design-section-hashes: 
+flyway-next-v: unknown
+
+## Queue
+- [ ] casehubio/casehub-ras#62 — Issue #62 ← active

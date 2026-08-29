@@ -1,1 +1,1 @@
-# Design Journal — issue-60-recall-metric-external-signal
+# Design Journal — issue-62-drift-recall-quality
