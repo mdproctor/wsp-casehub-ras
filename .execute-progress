@@ -1,0 +1,3 @@
+default=promoted
+ras:issue-60-recall-metric-external-signal=stamped
+casehub-ras:issue-60-recall-metric-external-signal=stamped
