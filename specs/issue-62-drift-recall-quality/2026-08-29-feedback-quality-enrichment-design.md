@@ -320,6 +320,13 @@ Published by `FeedbackUpdateJob` via `FeedbackMetrics.recordGanglionStatistics()
 
 The record is stored regardless. The cross-reference is informational — the system surfaces a potential operator error without overriding operator judgment.
 
+**Advisory text varies by report type.** The cross-reference checks situation-level triggers, but the meaning differs for situation-level vs ganglion-level reports:
+
+- **Situation-level report** (`ganglionIds` null/empty): A matching trigger suggests the operator may be reporting a miss for an event that was actually detected. Advisory: "A trigger was found for this situation within the cross-reference window. The report has been recorded. If the detection was correct, this report may inflate the missed count."
+- **Ganglion-level report** (`ganglionIds` present): A matching trigger means the situation was detected — but by other ganglia, not necessarily the ones named in the report. The per-ganglion miss is valid: the named ganglion(s) failed even though the situation was caught. Advisory: "A trigger was found for this situation within the cross-reference window, suggesting other ganglia may have detected the event. The per-ganglion miss has been recorded."
+
+`possiblyDetected` is `true` in both cases (the situation was detected). The framing changes because the question is different: "was this situation detected?" vs "did this specific ganglion contribute?"
+
 ### Cross-Reference Window
 
 `FeedbackConfig.crossRefWindow()` — configurable `Duration`, default `PT1H`. One hour before and after the reported `eventTime`. Wide enough for clock skew and event processing delays, narrow enough to be meaningful.
@@ -362,15 +369,29 @@ public record RecordResult(
 
 `POST /api/ras/feedback/missed` response gains optional `possiblyDetected` and `lastTriggerTime`:
 
-**201 Created** (with advisory):
+**201 Created** (situation-level report, trigger found):
 ```json
 {
     "reportId": "550e8400-e29b-41d4-a716-446655440000",
     "status": "RECORDED",
     "recordedAt": "2026-08-28T14:31:02Z",
     "possiblyDetected": true,
+    "crossRefConclusive": true,
     "lastTriggerTime": "2026-08-28T14:25:00Z",
     "advisory": "A trigger was found for this situation within the cross-reference window. The report has been recorded. If the detection was correct, this report may inflate the missed count."
+}
+```
+
+**201 Created** (ganglion-level report, trigger found):
+```json
+{
+    "reportId": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "RECORDED",
+    "recordedAt": "2026-08-28T14:31:02Z",
+    "possiblyDetected": true,
+    "crossRefConclusive": true,
+    "lastTriggerTime": "2026-08-28T14:25:00Z",
+    "advisory": "A trigger was found for this situation within the cross-reference window, suggesting other ganglia may have detected the event. The per-ganglion miss has been recorded."
 }
 ```
 
@@ -442,8 +463,8 @@ public record RecordResult(
 
 | Test | Scope | Verifies |
 |------|-------|----------|
-| `MissedDetectionRecorderCrossRefTest` | Unit | possiblyDetected true/false, crossRefConclusive true/false, SituationQueryService absent (graceful), window calculation, event outside history retention |
-| `MissedDetectionResourceCrossRefTest` | Integration | Response includes possiblyDetected, crossRefConclusive, and advisory |
+| `MissedDetectionRecorderCrossRefTest` | Unit | possiblyDetected true/false, crossRefConclusive true/false, SituationQueryService absent (graceful), window calculation, event outside history retention, differentiated advisory for situation-level vs ganglion-level reports |
+| `MissedDetectionResourceCrossRefTest` | Integration | Response includes possiblyDetected, crossRefConclusive, and correct advisory variant for situation-level and ganglion-level reports |
 
 ### FeedbackConfig Extension
 
