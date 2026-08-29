@@ -80,7 +80,7 @@ feedback:
 
 ### Metric
 
-`ras.feedback.drift` — gauge with value 1.0, tagged with `direction`, `situation_id`, `tenancy_id`. Published by `FeedbackUpdateJob` via `FeedbackMetrics` every 5 minutes.
+`ras.feedback.drift` — gauge tagged with `direction`, `situation_id`, `tenancy_id`. Published by `FeedbackUpdateJob` via `FeedbackMetrics` every 5 minutes. Each `(situationId, tenancyId)` pair produces exactly one gauge per cycle — `FeedbackMetrics` uses a dedicated `setDriftGauge()` that re-registers the gauge with the current direction tag, replacing the previous direction. Internally, the drift gauge uses a separate holder keyed by `(situationId, tenancyId)` (without direction) to avoid stale gauges accumulating when the direction changes.
 
 ### BOTH_DRIFTING Auto-Tuning Guard
 
@@ -180,7 +180,7 @@ Promotion to `QualityMetrics` is gated on adoption evidence — sufficient gangl
 
 ### OutcomeLedger Extension
 
-`ganglionStatistics()` returns extended `GanglionOutcomeStatistics` with `missedCount`. The count comes from `ras_missed_detection` records that carry the ganglionId in their `ganglion_ids` JSONB.
+`ganglionStatistics()` returns extended `GanglionOutcomeStatistics` with `missedCount`. This is a two-query union: the existing `ras_outcome_record` JSONB aggregation query (#59) produces per-ganglion outcome counts, and a second query against `ras_missed_detection` produces per-ganglion missed counts. Results are merged by ganglionId into the same `Map<String, GanglionOutcomeStatistics>` — the missed count from the second query is set on the corresponding entry from the first query (defaulting to 0 for ganglia with no missed reports).
 
 ### Persistence
 
