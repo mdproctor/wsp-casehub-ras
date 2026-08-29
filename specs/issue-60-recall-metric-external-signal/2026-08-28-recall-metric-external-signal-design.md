@@ -41,32 +41,57 @@ New record type in `api/`. Separate from `OutcomeRecord` — missed detections h
 | `tenancyId` | String | Tenant identity |
 | `eventTime` | Instant | When the missed event occurred (operator-specified) |
 | `reportedBy` | String | Operator identity for audit trail |
-| `reportId` | UUID | Deduplication key |
+| `reportId` | UUID | Client-generated idempotency key |
 | `recordedAt` | Instant | System-generated timestamp of report filing |
 
 ### Deduplication
 
-Composite key: `(situationId, correlationKey, tenancyId, eventTime)`. Duplicate reports for the same miss are idempotent — the same missed event reported N times counts as 1 false negative. `reportId` (UUID) provides an additional external dedup handle.
+Two deduplication mechanisms at different levels:
+
+1. **Domain-level:** Composite key `(situationId, correlationKey, tenancyId, eventTime)` enforced by UNIQUE constraint. The same missed event reported N times counts as 1 false negative.
+2. **Transport-level:** `reportId` (UUID) enforced by UNIQUE constraint. Client-generated idempotency key for safe HTTP retries — a retried request with the same `reportId` returns the existing record. The REST endpoint returns `DUPLICATE` status for both dedup paths.
 
 ## OutcomeLedger Extension
 
-New method on existing SPI:
+New required method on existing SPI:
 
 ```java
-default void recordMissed(MissedDetectionRecord record) {
-    throw new UnsupportedOperationException("recordMissed not implemented");
-}
+void recordMissed(MissedDetectionRecord record);
 ```
 
-Default throws `UnsupportedOperationException` rather than silently dropping — callers must know if the implementation doesn't support missed detection recording. This is a pre-release API; the default can be changed to no-op when the feature stabilises.
+Required, not default. There are exactly two implementations (`InMemoryOutcomeLedger`, `JpaOutcomeLedger`), both in-project. A default-throws would be a backward-compatibility shim — the platform has no external callers. Compile-time enforcement is strictly better than a runtime `UnsupportedOperationException`.
 
 ### statistics() Extension
 
 `OutcomeStatistics` gains a `missedCount` field. The existing `statistics()` method returns the extended record. All counts use the same `FeedbackConfig.retentionPeriod()` time window.
 
-### Existing Methods Unchanged
+Implementation mechanics — `statistics()` now queries two data sources to build one record:
 
-`record()`, `lastNoiseDismissalTime()`, `countByLabel()`, `ganglionStatistics()`, `distinctTenancies()`, `removeRecordsBefore()` — all unchanged. `removeRecordsBefore()` applies to missed detection records as well (retention cleanup).
+**JPA:** Two queries in the same `@Transactional` method. The existing `GROUP BY classification` query on `ras_outcome_record` is unchanged. A second query counts missed detections:
+
+```sql
+SELECT COUNT(*) FROM ras_missed_detection
+WHERE situation_id = :sid AND tenancy_id = :tid AND event_time >= :since
+```
+
+The `event_time` filter aligns with the `closed_at >= :since` filter on outcome records — both represent when the real-world event occurred.
+
+**In-memory:** `statistics()` counts entries from the missed detection `ConcurrentHashMap` where `eventTime >= since`, in addition to the existing outcome record counts.
+
+### Existing Method Impact
+
+**Unchanged:** `record()`, `lastNoiseDismissalTime()`, `countByLabel()`, `ganglionStatistics()` — no changes.
+
+**Changed — `distinctTenancies()`:** Must union tenants from both `ras_outcome_record` and `ras_missed_detection`. Without this, tenants with missed detection reports but no case outcomes are invisible to `FeedbackUpdateJob` — their recall is never computed.
+
+- **JPA:** `SELECT DISTINCT tenancy_id FROM ras_outcome_record WHERE situation_id = :sid UNION SELECT DISTINCT tenancy_id FROM ras_missed_detection WHERE situation_id = :sid`
+- **In-memory:** Union keys from both the outcome `store` and the missed detection `ConcurrentHashMap`.
+
+**Changed — `removeRecordsBefore()`:** Extends to clean up missed detection records alongside outcome records.
+
+- **JPA:** Second `DELETE FROM ras_missed_detection WHERE situation_id = :sid AND event_time < :cutoff` in the same `@Transactional` method. Uses `event_time` (when the event occurred), consistent with `closed_at` on outcome records.
+- **In-memory:** Iterates both stores, removes expired entries.
+- **Return value:** Sum of deleted records from both sources. Callers (`FeedbackUpdateJob`) use this only for logging/metrics.
 
 ## Recall Computation
 
@@ -88,9 +113,73 @@ When ganglion-level signals are added in a future enrichment, `recall()` can be 
 
 `recall()` returns `NaN` when `confirmedCount + missedCount == 0`, consistent with `precision()`'s NaN convention. `FeedbackMetrics.setGauge()` suppresses gauge registration for NaN values.
 
+## REST Endpoint
+
+RAS currently has no REST endpoints. This is the first JAX-RS resource in the project.
+
+### Endpoint
+
+`POST /api/ras/feedback/missed`
+
+### Request Body
+
+```json
+{
+    "situationId": "fire-risk-detector",
+    "correlationKey": "ACC-12345",
+    "tenancyId": "tenant-prod",
+    "eventTime": "2026-08-28T14:30:00Z",
+    "reportedBy": "operator@example.com",
+    "reportId": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+All fields required. `reportId` is client-generated (UUID). `eventTime` is the operator's assertion of when the missed event occurred. `recordedAt` is system-generated at ingestion time and not part of the request.
+
+### Response
+
+**201 Created** — new record stored:
+```json
+{
+    "reportId": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "RECORDED",
+    "recordedAt": "2026-08-28T14:31:02Z"
+}
+```
+
+**200 OK** — idempotent duplicate (same composite key or same `reportId`):
+```json
+{
+    "reportId": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "DUPLICATE"
+}
+```
+
+**400 Bad Request** — validation failure:
+```json
+{
+    "error": "UNKNOWN_SITUATION",
+    "message": "Situation 'nonexistent' is not registered"
+}
+```
+
+Error codes: `UNKNOWN_SITUATION`, `EVENT_OUTSIDE_WINDOW`, `INVALID_REQUEST`.
+
+### Ingestion Service
+
+`MissedDetectionRecorder` in `runtime/` — mirrors `OutcomeRecorder`'s pattern (thin adapter → validation → ledger storage). The REST resource delegates to this service. The service:
+
+1. Validates the request (see Validation below)
+2. Sets `recordedAt` to `Instant.now()`
+3. Calls `OutcomeLedger.recordMissed()`
+4. Increments `ras.feedback.missed` counter on success
+5. Increments `ras.feedback.missed.rejected` counter on validation failure
+
+This separation keeps the REST resource thin (HTTP concerns only) and the ingestion logic independently testable. Future signal sources (batch import, streaming) call `MissedDetectionRecorder` directly, not the REST resource.
+
 ## Validation
 
-On ingestion (`recordMissed` call path):
+On ingestion (`MissedDetectionRecorder` call path):
 
 1. **Situation exists:** `SituationDefinitionRegistry.exists(situationId)` — reject unknown situations
 2. **Temporal bounds:** `eventTime` within `FeedbackConfig.retentionPeriod()` of current time — records outside the window would be cleaned up by retention immediately
@@ -105,6 +194,12 @@ Validation that the situation wasn't actually detected (cross-referencing `Situa
 | `ras.feedback.recall` | gauge | `situation_id`, `tenancy_id` | Recall per situation per tenant |
 | `ras.feedback.missed` | counter | `situation_id`, `tenancy_id` | Missed detection reports received |
 | `ras.feedback.missed.rejected` | counter | `situation_id`, `reason` | Reports rejected by validation |
+
+**Increment locations:**
+
+- `ras.feedback.recall` — gauge pushed by `FeedbackUpdateJob` via `FeedbackMetrics.recordStatistics()`, alongside precision and noise rate
+- `ras.feedback.missed` — counter incremented by `MissedDetectionRecorder` on successful `recordMissed()` call
+- `ras.feedback.missed.rejected` — counter incremented by `MissedDetectionRecorder` when validation rejects a report
 
 Existing gauges (`ras.feedback.precision`, `ras.feedback.noise_rate`) are unchanged. `FeedbackUpdateJob` pushes recall alongside them.
 
@@ -128,13 +223,16 @@ CREATE TABLE ras_missed_detection (
     reported_by   VARCHAR(255) NOT NULL,
     report_id     UUID NOT NULL,
     recorded_at   TIMESTAMP WITH TIME ZONE NOT NULL,
-    UNIQUE(situation_id, correlation_key, tenancy_id, event_time)
+    UNIQUE(situation_id, correlation_key, tenancy_id, event_time),
+    UNIQUE(report_id)
 );
 
 CREATE INDEX idx_missed_detection_situation ON ras_missed_detection(situation_id, tenancy_id);
 ```
 
-`INSERT ON CONFLICT` for deduplication (same pattern as `ras_outcome_record`). `statistics()` query joins outcome count with missed detection count in the same time window.
+**Schema note:** The existing `ras_outcome_record` (V7) uses `GENERATED BY DEFAULT AS IDENTITY` and `TIMESTAMP` (without time zone) for `closed_at`. The new table uses the stricter `GENERATED ALWAYS AS IDENTITY` and `TIMESTAMP WITH TIME ZONE`. Both choices are correct for the new table. Aligning V7's types is pre-existing tech debt not introduced by this spec.
+
+`INSERT ON CONFLICT DO NOTHING` for deduplication on both the composite key and `report_id` (same pattern as `ras_outcome_record`'s `case_id` dedup). `statistics()` runs a second `COUNT(*)` query against `ras_missed_detection` in the same `@Transactional` method.
 
 ## Tuning Interaction
 
@@ -151,11 +249,12 @@ Deferred to a follow-on design. `DriftDirection` does not exist in the codebase.
 | `MissedDetectionRecord` | `api/` | Domain type |
 | `OutcomeLedger.recordMissed()` | `api/` | SPI extension |
 | `OutcomeStatistics.missedCount` + `recall()` | `api/` | Domain type extension |
+| `MissedDetectionResource` | `runtime/` | JAX-RS endpoint (POST /api/ras/feedback/missed) |
+| `MissedDetectionRecorder` | `runtime/` | Ingestion service (validation + storage + counters) |
 | `InMemoryOutcomeLedger` extension | `runtime/` | Default implementation |
 | `FeedbackAnalyzer` extension | `runtime/` | Recall in analysis output |
 | `FeedbackMetrics` recall gauge | `runtime/` | Micrometer integration |
 | `FeedbackUpdateJob` recall push | `runtime/` | Scheduled update |
-| Validation logic | `runtime/` | Registration check + temporal bounds |
 | `JpaOutcomeLedger` extension | `persistence-jpa/` | JPA persistence |
 | Flyway V9 migration | `persistence-jpa/` | Schema extension |
 
@@ -170,18 +269,24 @@ Deferred to a follow-on design. `DriftDirection` does not exist in the codebase.
 | `FeedbackUpdateJobRecallTest` | Unit | recall gauge pushed alongside precision/noise_rate |
 | `AbstractOutcomeLedgerContractTest` extension | Contract | recordMissed contract across implementations |
 | `JpaOutcomeLedgerMissedTest` | Integration | Flyway V9, INSERT ON CONFLICT dedup, statistics query |
-| Validation tests | Unit | Unknown situation rejected, out-of-window rejected, dedup idempotent |
+| `MissedDetectionRecorderTest` | Unit | Validation (unknown situation, out-of-window), dedup idempotent, counter increments |
+| `MissedDetectionResourceTest` | Integration | HTTP 201/200/400 responses, request body parsing, error response format |
+| `MissedDetectionIngestionIT` | Integration | End-to-end: POST → validation → storage → statistics reflect missedCount |
 
 ## Epistemological Limitations
 
 Operator-reported recall is inherently biased. Operators can only report misses they independently notice — systematic blind spots (entire event patterns the system never processes) remain invisible. This is not a flaw in the design; it's an inherent property of any external false-negative signal. Adding future sources (ground truth systems, periodic audit sampling) mitigates but never eliminates this bias. The recall metric should be interpreted as a lower bound on the true miss rate.
 
+## Scope
+
+Issue #60 specifies four requirements: ingestion path, recall computation, UNDER_SENSITIVE wiring, and recall gauge. This spec delivers three of four — UNDER_SENSITIVE wiring is deferred to the DriftDirection design (#62). Issue #60 remains open until that work is complete.
+
 ## Known Gaps
 
-1. **Per-ganglion recall:** Requires ganglion-level missed detection signals (future enrichment on D2)
-2. **DriftDirection classification:** Deferred to separate design (D8)
+1. **Per-ganglion recall:** Requires ganglion-level missed detection signals (#63)
+2. **DriftDirection classification:** Deferred to separate design (#62)
 3. **F1 score gauge:** Operators compute externally from precision + recall gauges; one-line addition when needed
-4. **Trigger-history cross-reference:** Validation that the situation wasn't actually detected is deferred — operators assert domain facts the system can't verify
+4. **Trigger-history cross-reference:** Validation that the situation wasn't actually detected is deferred (#64) — operators assert domain facts the system can't verify
 
 ## References
 
@@ -190,14 +295,20 @@ Operator-reported recall is inherently biased. Operators can only report misses 
 - `OutcomeStatistics.java` — gains `missedCount` + `recall()`
 - `QualityMetrics.java` — NOT gaining `recall()` (see design rationale)
 - `FeedbackAnalyzer.java` — gains recall in analysis output
-- `FeedbackMetrics.java` — gains recall gauge
+- `FeedbackMetrics.java` — gains recall gauge + missed counters
 - `FeedbackUpdateJob.java` — pushes recall gauge
 - `InMemoryOutcomeLedger.java` — runtime/ default impl
 - `JpaOutcomeLedger.java` — persistence-jpa/ impl
+- `MissedDetectionResource.java` — new REST endpoint
+- `MissedDetectionRecorder.java` — new ingestion service
+- `SituationDefinitionRegistry.java` — `exists()` method for validation
 - `AbstractOutcomeLedgerContractTest.java` — contract test extension
 - `DefaultTuningStrategy.java` — unchanged (no auto-tuning for recall)
 - Issue #60 — recall metric requirement
 - Issue #58 — three signal sources identified (closed as duplicate)
 - Issue #40 — feedback loop design (requirement 4: precision/recall per ganglion)
+- Issue #62 — DriftDirection classification (deferred from this spec)
+- Issue #63 — per-ganglion recall (deferred from this spec)
+- Issue #64 — trigger-history cross-reference (deferred from this spec)
 - `2026-08-06-ras-feedback-loop-design.md` — feedback loop spec
 - `2026-08-21-per-ganglion-quality-metrics-design.md` — quality metrics spec
