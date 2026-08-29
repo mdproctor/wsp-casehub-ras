@@ -34,7 +34,7 @@ OVER_SENSITIVE and UNDER_SENSITIVE measure independent axes of the confusion mat
 
 ### Classification Logic
 
-`FeedbackAnalyzer.classifyDrift(OutcomeStatistics, FeedbackConfig)`:
+Default method on `FeedbackTuningStrategy.classifyDrift(OutcomeStatistics, FeedbackConfig)`:
 
 1. If `totalOutcomes < MIN_DRIFT_OUTCOMES (10)` → `INSUFFICIENT_DATA`
 2. `overSensitive = !NaN(noiseRate) && noiseRate > config.overSensitiveThreshold()`
@@ -50,15 +50,51 @@ OVER_SENSITIVE and UNDER_SENSITIVE measure independent axes of the confusion mat
 
 Threshold semantics: `overSensitiveThreshold` is a noise rate **ceiling** (above = over-sensitive). `underSensitiveThreshold` is a recall **floor** (below = under-sensitive).
 
+Placement rationale: The #40 spec establishes that interpretive classification belongs on `FeedbackTuningStrategy`, not `FeedbackAnalyzer`. The analyzer is a thin data-access layer returning raw statistics; the strategy decides what statistics mean. `classifyDrift()` is an interpretive decision — it classifies statistics into a qualitative label. Default method provides a standard classification model; custom strategy implementations can override to define their own drift model.
+
+### DefaultTuningStrategy Threshold Coherence
+
+`DefaultTuningStrategy.adjustThreshold()` currently hardcodes `noiseRate > 0.5`. This must change to use `config.overSensitiveThreshold()` so the tuning action aligns with the drift classification:
+
+```java
+double threshold = config.overSensitiveThreshold();
+if (Double.isNaN(noiseRate) || noiseRate <= threshold) return OptionalDouble.empty();
+double adjustment = config.learningRate() * (noiseRate - threshold);
+```
+
+Without this change, the drift gauge and auto-tuning disagree: classification could report OVER_SENSITIVE while `adjustThreshold()` takes no action (or vice versa). Both must use the same threshold.
+
 ### FeedbackConfig Extension
 
-Two new optional fields:
+Three new optional fields:
 
 ```java
 // On FeedbackConfig record
 double overSensitiveThreshold,    // default 0.5, noise rate ceiling
 double underSensitiveThreshold,   // default 0.5, recall floor
 Duration crossRefWindow           // default PT1H, for trigger cross-reference
+```
+
+Backward-compatible constructor (defaults new fields):
+
+```java
+public FeedbackConfig(Set<String> noiseLabels, Set<String> confirmedLabels,
+        Duration suppressionCooldown, double learningRate,
+        Duration retentionPeriod, boolean tuningEnabled) {
+    this(noiseLabels, confirmedLabels, suppressionCooldown, learningRate,
+         retentionPeriod, tuningEnabled, 0.5, 0.5, Duration.ofHours(1));
+}
+```
+
+`YamlSituationDefinitionProvider.parseFeedbackConfig()` reads the new fields with defaults for existing configurations that omit them:
+
+```java
+double overSensitiveThreshold = map.containsKey("overSensitiveThreshold")
+    ? ((Number) map.get("overSensitiveThreshold")).doubleValue() : 0.5;
+double underSensitiveThreshold = map.containsKey("underSensitiveThreshold")
+    ? ((Number) map.get("underSensitiveThreshold")).doubleValue() : 0.5;
+Duration crossRefWindow = map.containsKey("crossRefWindow")
+    ? Duration.parse((String) map.get("crossRefWindow")) : Duration.ofHours(1);
 ```
 
 Validation: both thresholds in (0.0, 1.0]. `crossRefWindow` positive.
@@ -80,13 +116,44 @@ feedback:
 
 ### Metric
 
-`ras.feedback.drift` — gauge tagged with `direction`, `situation_id`, `tenancy_id`. Published by `FeedbackUpdateJob` via `FeedbackMetrics` every 5 minutes. Each `(situationId, tenancyId)` pair produces exactly one gauge per cycle — `FeedbackMetrics` uses a dedicated `setDriftGauge()` that re-registers the gauge with the current direction tag, replacing the previous direction. Internally, the drift gauge uses a separate holder keyed by `(situationId, tenancyId)` (without direction) to avoid stale gauges accumulating when the direction changes.
+`ras.feedback.drift` — gauge set tagged with `direction`, `situation_id`, `tenancy_id`. Published by `FeedbackUpdateJob` via `FeedbackMetrics` every 5 minutes.
+
+**Numeric value:** Each gauge reports `1.0` (active direction) or `0.0` (inactive). `FeedbackMetrics.setDriftGauges()` registers one gauge per direction per `(situationId, tenancyId)` — all 5 `DriftDirection` values. On each cycle, the current direction's gauge is set to `1.0` and the other four to `0.0`. This is the standard Micrometer state-gauge pattern and avoids the stale-gauge problem: when direction changes from `OVER_SENSITIVE` to `STABLE`, the `OVER_SENSITIVE` gauge goes to `0.0` rather than persisting at its last value.
+
+**Implementation:** `FeedbackMetrics` maintains a holder map keyed by `(situationId, tenancyId, direction)`. On first encounter of a `(situationId, tenancyId)` pair, all 5 direction gauges are registered in the `MeterRegistry`. On each cycle, the active direction's `AtomicReference<Double>` is set to `1.0` and the others to `0.0`.
+
+Prometheus query example: `ras_feedback_drift{direction="OVER_SENSITIVE"} == 1` selects all situation-tenant pairs currently drifting over-sensitive. Alert rules: `ras_feedback_drift{direction="BOTH_DRIFTING"} == 1` surfaces miscalibrated detectors.
 
 ### BOTH_DRIFTING Auto-Tuning Guard
 
 When `classifyDrift()` returns `BOTH_DRIFTING`, `FeedbackUpdateJob.processTenant()` skips both threshold adjustment and prior adjustment for that `(situationId, tenancyId)` pair. Auto-tuning is inappropriate when the detection model is fundamentally miscalibrated — raising thresholds worsens recall, and prior adjustment based on skewed data propagates the miscalibration.
 
 OVER_SENSITIVE-only auto-tuning is unchanged. UNDER_SENSITIVE has no auto-tuning (D4 from #60).
+
+### Drift Publication Positioning in FeedbackUpdateJob
+
+Drift classification and gauge publication are **observational** — they execute unconditionally, alongside `recordStatistics()` and `recordGanglionStatistics()`, before the `tuningEnabled` guard:
+
+```java
+// Observational block (always executes)
+OutcomeStatistics stats = analyzer.analyze(situationId, tenancyId, config);
+feedbackMetrics.recordStatistics(situationId, tenancyId, stats);
+
+Map<String, GanglionOutcomeStatistics> ganglionStats = ...;
+feedbackMetrics.recordGanglionStatistics(...);
+
+DriftDirection drift = tuningStrategy.classifyDrift(stats, config);
+feedbackMetrics.setDriftGauges(drift, situationId, tenancyId);
+
+if (!config.tuningEnabled()) return;
+
+// Tuning-only block (after guard)
+if (drift == DriftDirection.BOTH_DRIFTING) return;
+
+// threshold + prior adjustment
+```
+
+Advisory-mode situations (`tuningEnabled: false`, the default) get drift gauges published — operators see drift direction even without auto-tuning enabled. The `BOTH_DRIFTING` guard only suppresses tuning actions, not observation.
 
 ## Per-Ganglion Missed Detection Signals (#63)
 
@@ -162,8 +229,9 @@ public record GanglionOutcomeStatistics(
     }
 
     public double recall() {
+        if (missedCount == 0) return Double.NaN;
         long decisive = confirmedCount + missedCount;
-        return decisive == 0 ? Double.NaN : confirmedCount / (double) decisive;
+        return confirmedCount / (double) decisive;
     }
 }
 ```
@@ -172,15 +240,26 @@ public record GanglionOutcomeStatistics(
 
 `recall()` stays on `OutcomeStatistics` (situation-level) and `GanglionOutcomeStatistics` (per-ganglion) as separate methods — NOT promoted to the `QualityMetrics` interface.
 
-Most operators will file situation-level missed reports (no ganglionIds). For ganglia without explicit missed reports, `missedCount` stays 0 and a `recall()` default on `QualityMetrics` would return `confirmedCount / (confirmedCount + 0) = 1.0` — misleadingly implying perfect recall when no data exists. This is the exact problem #60 D6 was designed to prevent.
+Most operators will file situation-level missed reports (no ganglionIds). For ganglia without explicit missed reports, `missedCount` stays 0. A `recall()` default on `QualityMetrics` would return `1.0` for any ganglion with confirmed outcomes — misleadingly implying perfect recall when no data exists. This is the exact problem #60 D6 was designed to prevent.
 
-The semantic difference: situation-level `missedCount == 0` means "no misses reported" (metric accurate given available data). Per-ganglion `missedCount == 0` means "measurement not available" (no ganglion-level reports filed). Different semantics, different methods.
+The semantic difference: situation-level `missedCount == 0` means "no misses reported" (metric accurate given available data). Per-ganglion `missedCount == 0` means "measurement not available" (no ganglion-level reports filed). `GanglionOutcomeStatistics.recall()` encodes this directly: it returns `NaN` when `missedCount == 0`, suppressing the `ras.feedback.ganglion.recall` gauge via the existing NaN convention. When the first ganglion-level missed report is filed (making `missedCount > 0`), recall becomes computable and the gauge appears. This prevents publishing misleading `1.0` values for all ganglia before ganglion-level reporting is adopted.
 
 Promotion to `QualityMetrics` is gated on adoption evidence — sufficient ganglion-level missed detection reports in production.
 
 ### OutcomeLedger Extension
 
-`ganglionStatistics()` returns extended `GanglionOutcomeStatistics` with `missedCount`. This is a two-query union: the existing `ras_outcome_record` JSONB aggregation query (#59) produces per-ganglion outcome counts, and a second query against `ras_missed_detection` produces per-ganglion missed counts. Results are merged by ganglionId into the same `Map<String, GanglionOutcomeStatistics>` — the missed count from the second query is set on the corresponding entry from the first query (defaulting to 0 for ganglia with no missed reports).
+`ganglionStatistics()` returns extended `GanglionOutcomeStatistics` with `missedCount`. This is a two-query union: the existing `ras_outcome_record` JSONB aggregation query (#59) produces per-ganglion outcome counts, and a second query against `ras_missed_detection` produces per-ganglion missed counts. Results are merged by ganglionId via a full union: both queries contribute to the same `Map<String, long[]>` (4 slots: noise, confirmed, neutral, missed). Ganglia appearing only in the outcome query get `missedCount = 0`. Ganglia appearing only in the missed query get `totalOutcomes = 0`, `noiseCount = 0`, `confirmedCount = 0`, `neutralCount = 0` — these are ganglia that consistently failed to fire and were explicitly reported as missed. Their `recall() = 0 / (0 + missedCount)` = 0.0, which is the most actionable signal (completely broken ganglion).
+
+For JPA, the merge uses `computeIfAbsent` to handle ganglia from either source:
+
+```java
+// After outcome query builds counts map (slots 0-2):
+// Missed query results merged into the same map:
+long[] c = counts.computeIfAbsent(ganglionId, k -> new long[4]);
+c[3] += missedCount;
+```
+
+For `InMemoryOutcomeLedger`: same union logic — iterate `missedStore` entries with non-null `ganglionIds`, extract each ganglionId, merge into the same counts map. Ganglia appearing only in `missedStore` are included via `computeIfAbsent`.
 
 ### Persistence
 
@@ -191,7 +270,22 @@ ALTER TABLE ras_missed_detection
   ADD COLUMN ganglion_ids JSONB;
 ```
 
-Nullable. Existing rows have NULL (situation-level misses). `JpaOutcomeLedger.ganglionStatistics()` joins against `ras_missed_detection` for per-ganglion missed counts:
+Nullable. Existing rows have NULL (situation-level misses).
+
+**Write path — `JpaOutcomeLedger.recordMissed()` update:**
+
+The INSERT must include `ganglion_ids`:
+
+```sql
+INSERT INTO ras_missed_detection (situation_id, correlation_key, tenancy_id,
+event_time, reported_by, report_id, recorded_at, ganglion_ids)
+VALUES (:sid, :ck, :tid, :et, :rb, :rid, :ra, CAST(:gids AS jsonb))
+ON CONFLICT DO NOTHING
+```
+
+`ganglion_ids` is serialized from `MissedDetectionRecord.ganglionIds()` as a JSON array of strings via `ObjectMapper`. NULL when `ganglionIds` is null or empty (situation-level miss).
+
+**Read path — `JpaOutcomeLedger.ganglionStatistics()`** joins against `ras_missed_detection` for per-ganglion missed counts:
 
 ```sql
 SELECT elem AS ganglion_id, COUNT(*)
@@ -232,7 +326,11 @@ The record is stored regardless. The cross-reference is informational — the sy
 
 ### Retention Mismatch Caveat
 
-If `ras.event-history.retention` (default P30D) is shorter than `FeedbackConfig.retentionPeriod`, the cross-reference returns "not detected" for events whose trigger history has been cleaned up. The `possiblyDetected` response must carry this caveat: absence of trigger history does not confirm a miss — events older than the event history retention period cannot be cross-referenced.
+If `ras.event-history.retention` (default P30D) is shorter than `FeedbackConfig.retentionPeriod`, the cross-reference returns "not detected" for events whose trigger history has been cleaned up. Absence of trigger history does not confirm a miss — events older than the event history retention period cannot be cross-referenced.
+
+`MissedDetectionRecorder` injects `@ConfigProperty(name = "ras.event-history.retention", defaultValue = "P30D") Duration eventHistoryRetention` (same property used by `SituationExpiryJob`). Before performing cross-reference, it checks whether `eventTime` falls within the event history retention window (`Instant.now().minus(eventHistoryRetention)`). If outside, cross-reference is skipped and `crossRefConclusive` is set to `false` on `RecordResult`. If inside, cross-reference proceeds normally and `crossRefConclusive` is `true`.
+
+The REST response includes `crossRefConclusive` for machine-readable interpretation. When `false`, operators and automation know that `possiblyDetected: false` means "cannot determine" rather than "genuinely not detected."
 
 ### RecordResult Extension
 
@@ -242,18 +340,20 @@ public record RecordResult(
         boolean isNew,
         String rejectionReason,
         boolean possiblyDetected,           // new
-        Instant lastTriggerTime             // new, nullable
+        Instant lastTriggerTime,            // new, nullable
+        boolean crossRefConclusive          // new — false when eventTime outside event history retention
 ) {
     // Existing factory methods preserved with defaults
     static RecordResult accepted(boolean isNew) {
-        return new RecordResult(true, isNew, null, false, null);
+        return new RecordResult(true, isNew, null, false, null, false);
     }
     static RecordResult accepted(boolean isNew, boolean possiblyDetected,
-                                  Instant lastTriggerTime) {
-        return new RecordResult(true, isNew, null, possiblyDetected, lastTriggerTime);
+                                  Instant lastTriggerTime, boolean crossRefConclusive) {
+        return new RecordResult(true, isNew, null, possiblyDetected,
+                                lastTriggerTime, crossRefConclusive);
     }
     static RecordResult rejected(String reason) {
-        return new RecordResult(false, false, reason, false, null);
+        return new RecordResult(false, false, reason, false, null, false);
     }
 }
 ```
@@ -274,13 +374,26 @@ public record RecordResult(
 }
 ```
 
-**201 Created** (no advisory):
+**201 Created** (no advisory, conclusive cross-reference):
 ```json
 {
     "reportId": "550e8400-e29b-41d4-a716-446655440000",
     "status": "RECORDED",
     "recordedAt": "2026-08-28T14:31:02Z",
-    "possiblyDetected": false
+    "possiblyDetected": false,
+    "crossRefConclusive": true
+}
+```
+
+**201 Created** (outside retention window):
+```json
+{
+    "reportId": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "RECORDED",
+    "recordedAt": "2026-08-28T14:31:02Z",
+    "possiblyDetected": false,
+    "crossRefConclusive": false,
+    "advisory": "The event occurred outside the trigger history retention window. Cross-reference results may be incomplete."
 }
 ```
 
@@ -289,16 +402,17 @@ public record RecordResult(
 | Component | Module | Notes |
 |-----------|--------|-------|
 | `DriftDirection` | `api/` | New enum |
-| `FeedbackConfig` (change) | `api/` | +overSensitiveThreshold, +underSensitiveThreshold, +crossRefWindow |
+| `FeedbackConfig` (change) | `api/` | +overSensitiveThreshold, +underSensitiveThreshold, +crossRefWindow, +6-arg backward-compatible constructor |
+| `FeedbackTuningStrategy` (change) | `api/` | +classifyDrift() default method |
 | `MissedDetectionRecord` (change) | `api/` | +ganglionIds |
-| `GanglionOutcomeStatistics` (change) | `api/` | +missedCount, +recall() |
-| `FeedbackAnalyzer` (change) | `runtime/` | +classifyDrift() |
-| `FeedbackUpdateJob` (change) | `runtime/` | +drift publication, +BOTH_DRIFTING guard |
+| `GanglionOutcomeStatistics` (change) | `api/` | +missedCount, +recall() (NaN when missedCount == 0) |
+| `DefaultTuningStrategy` (change) | `runtime/` | adjustThreshold() uses config.overSensitiveThreshold() instead of hardcoded 0.5 |
+| `FeedbackUpdateJob` (change) | `runtime/` | +drift publication (observational block), +BOTH_DRIFTING guard (tuning block) |
 | `FeedbackMetrics` (change) | `runtime/` | +drift gauge, +ganglion recall gauge |
-| `MissedDetectionRecorder` (change) | `runtime/` | +ganglionId validation, +cross-reference |
-| `MissedDetectionResource` (change) | `runtime/` | +ganglionIds in request, +possiblyDetected in response |
+| `MissedDetectionRecorder` (change) | `runtime/` | +ganglionId validation, +cross-reference, +crossRefConclusive |
+| `MissedDetectionResource` (change) | `runtime/` | +ganglionIds in request, +possiblyDetected/crossRefConclusive in response |
 | `InMemoryOutcomeLedger` (change) | `runtime/` | +ganglion missed counts in ganglionStatistics() |
-| `JpaOutcomeLedger` (change) | `persistence-jpa/` | +ganglion missed counts SQL |
+| `JpaOutcomeLedger` (change) | `persistence-jpa/` | +ganglion missed counts SQL, +ganglion_ids in recordMissed() INSERT |
 | Flyway V10 | `persistence-jpa/` | ALTER TABLE ras_missed_detection ADD ganglion_ids JSONB |
 | `YamlSituationDefinitionProvider` (change) | `runtime/` | +new FeedbackConfig fields parsing |
 
@@ -309,7 +423,7 @@ public record RecordResult(
 | Test | Scope | Verifies |
 |------|-------|----------|
 | `DriftDirectionTest` | Unit | Enum values, coverage |
-| `FeedbackAnalyzerDriftTest` | Unit | classifyDrift() logic: all 5 states, NaN handling, threshold configurability, MIN_DRIFT_OUTCOMES guard, MIN_RECALL_SAMPLES guard |
+| `FeedbackTuningStrategyDriftTest` | Unit | classifyDrift() default method: all 5 states, NaN handling, threshold configurability, MIN_DRIFT_OUTCOMES guard, MIN_RECALL_SAMPLES guard |
 | `FeedbackUpdateJobDriftTest` | Unit | Drift gauge published, BOTH_DRIFTING suppresses threshold/prior adjustment |
 | `FeedbackMetricsDriftTest` | Unit | ras.feedback.drift gauge registration and tag values |
 
@@ -328,8 +442,8 @@ public record RecordResult(
 
 | Test | Scope | Verifies |
 |------|-------|----------|
-| `MissedDetectionRecorderCrossRefTest` | Unit | possiblyDetected true/false, SituationQueryService absent (graceful), window calculation |
-| `MissedDetectionResourceCrossRefTest` | Integration | Response includes possiblyDetected and advisory |
+| `MissedDetectionRecorderCrossRefTest` | Unit | possiblyDetected true/false, crossRefConclusive true/false, SituationQueryService absent (graceful), window calculation, event outside history retention |
+| `MissedDetectionResourceCrossRefTest` | Integration | Response includes possiblyDetected, crossRefConclusive, and advisory |
 
 ### FeedbackConfig Extension
 
@@ -346,11 +460,11 @@ public record RecordResult(
 - `api/src/main/java/io/casehub/ras/api/FeedbackConfig.java` — gains drift thresholds + crossRefWindow
 - `api/src/main/java/io/casehub/ras/api/OutcomeLedger.java` — ganglionStatistics() returns extended stats
 - `api/src/main/java/io/casehub/ras/api/SituationQueryService.java` — history() for cross-reference
-- `runtime/src/main/java/io/casehub/ras/runtime/FeedbackAnalyzer.java` — gains classifyDrift()
-- `runtime/src/main/java/io/casehub/ras/runtime/FeedbackUpdateJob.java` — drift publication + BOTH_DRIFTING guard
+- `api/src/main/java/io/casehub/ras/api/FeedbackTuningStrategy.java` — gains classifyDrift() default method
+- `runtime/src/main/java/io/casehub/ras/runtime/DefaultTuningStrategy.java` — adjustThreshold() uses config.overSensitiveThreshold()
+- `runtime/src/main/java/io/casehub/ras/runtime/FeedbackUpdateJob.java` — drift publication (observational) + BOTH_DRIFTING guard (tuning)
 - `runtime/src/main/java/io/casehub/ras/runtime/FeedbackMetrics.java` — drift gauge + ganglion recall gauge
-- `runtime/src/main/java/io/casehub/ras/runtime/MissedDetectionRecorder.java` — ganglion validation + cross-reference
-- `runtime/src/main/java/io/casehub/ras/runtime/DefaultTuningStrategy.java` — unchanged
+- `runtime/src/main/java/io/casehub/ras/runtime/MissedDetectionRecorder.java` — ganglion validation + cross-reference + crossRefConclusive + event history retention check
 - `docs/specs/issue-60-recall-metric-external-signal/2026-08-28-recall-metric-external-signal-design.md` — parent spec
 - `docs/specs/issue-59-per-ganglion-quality-metrics/2026-08-21-per-ganglion-quality-metrics-design.md` — per-ganglion quality
 - `docs/specs/issue-40-ras-feedback-loop/2026-08-06-ras-feedback-loop-design.md` — feedback loop foundation
