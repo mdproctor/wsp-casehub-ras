@@ -13,10 +13,10 @@ flyway-next-v: unknown
 
 ## Queue
 - [ ] casehubio/casehub-ras#62 — Issue #62 ← active
-  - [ ] Batch 1: API Foundation
-    - [ ] Task 1: DriftDirection enum + FeedbackConfig extension
-    - [ ] Task 2: FeedbackTuningStrategy.classifyDrift()
-    - [ ] Task 3: MissedDetectionRecord.ganglionIds + GanglionOutcomeStatistics recall
+  - [x] Batch 1: API Foundation
+    - [x] Task 1: DriftDirection enum + FeedbackConfig extension
+    - [x] Task 2: FeedbackTuningStrategy.classifyDrift()
+    - [x] Task 3: MissedDetectionRecord.ganglionIds + GanglionOutcomeStatistics recall
   - [ ] Batch 2: Persistence + Recording
     - [ ] Task 4: Flyway V10 + ledger ganglion missed counts
     - [ ] Task 5: Recorder ganglion validation + DefaultTuningStrategy coherence
