@@ -23,6 +23,6 @@ flyway-next-v: unknown
   - [x] Batch 3: Drift Runtime + YAML
     - [x] Task 6: FeedbackMetrics drift gauge + ganglion recall gauge
     - [x] Task 7: FeedbackUpdateJob drift + BOTH_DRIFTING guard + YAML
-  - [ ] Batch 4: Cross-Reference + REST
-    - [ ] Task 8: MissedDetectionRecorder trigger cross-reference
-    - [ ] Task 9: MissedDetectionResource full extension
+  - [x] Batch 4: Cross-Reference + REST
+    - [x] Task 8: MissedDetectionRecorder trigger cross-reference
+    - [x] Task 9: MissedDetectionResource full extension
