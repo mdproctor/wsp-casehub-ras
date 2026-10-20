@@ -136,6 +136,8 @@ No per-enum annotations needed.
               @JsonProperty("language") String language,
               @JsonProperty("values") List<String> values,
               @JsonProperty("likelihoods") double[][] likelihoods) {
+          Objects.requireNonNull(expressionText, "Feature missing required 'expression' field");
+          Objects.requireNonNull(language, "Feature missing required 'language' field");
           ExpressionEvaluator evaluator = switch (language) {
               case "jq" -> new JQExpressionEvaluator(expressionText);
               case "mvel" -> new MvelExpressionEvaluator(expressionText);
