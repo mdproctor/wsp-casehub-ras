@@ -13,12 +13,12 @@ flyway-next-v:
 
 ## Queue
 - [ ] casehubio/casehub-ras#70 — Issue #70 ← active
-  - [ ] Batch 1: Jackson annotations
-    - [ ] Task 1: @JsonProperty on ChainMode And/Sequence and CreateCase @JsonCreator
-    - [ ] Task 2: @JsonTypeInfo on GanglionDescriptor + SituationDefinition + FeedbackConfig defaults
-  - [ ] Batch 2: Deserializer
-    - [ ] Task 3: ExpressionEvaluatorDeserializer + RasYamlMapper
-  - [ ] Batch 3: Migration
-    - [ ] Task 4: Migrate YamlSituationDefinitionProvider to Jackson
-  - [ ] Batch 4: Registrar
-    - [ ] Task 5: SituationYamlRegistrar implementing ClasspathYamlRegistrar
+  - [x] Batch 1: Jackson annotations
+    - [x] Task 1: @JsonProperty on ChainMode And/Sequence and CreateCase @JsonCreator
+    - [x] Task 2: @JsonTypeInfo on GanglionDescriptor + SituationDefinition + FeedbackConfig defaults
+  - [x] Batch 2: Deserializer
+    - [x] Task 3: ExpressionEvaluatorDeserializer + RasYamlMapper
+  - [x] Batch 3: Migration
+    - [x] Task 4: Migrate YamlSituationDefinitionProvider to Jackson
+  - [x] Batch 4: Registrar
+    - [x] Task 5: SituationYamlRegistrar implementing ClasspathYamlRegistrar
