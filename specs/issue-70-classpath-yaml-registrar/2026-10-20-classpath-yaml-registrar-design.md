@@ -156,25 +156,42 @@ No per-enum annotations needed.
   (null for `otherwise` rules) — Jackson handles nullable record parameters.
 
 **otherwise handling:** The YAML for `otherwise` rules uses `otherwise: true` instead of `when`.
-Add `@JsonIgnoreProperties({"otherwise"})` on `ExpressionRules.Rule` so Jackson ignores the
-`otherwise` key. The `when` field will be null (absent from YAML), which is the correct
-representation for an otherwise rule:
+Add `boolean otherwise` as a record parameter so Jackson captures the key as data instead
+of ignoring it:
 ```java
-@JsonIgnoreProperties({"otherwise"})
 public record Rule(
         ExpressionEvaluator when,
+        boolean otherwise,
         DetectionSignal signal,
         double confidence,
         ExpressionEvaluator confidenceExpression,
         Map<String, ExpressionEvaluator> evidenceTemplates
-) {}
+) {
+    public Rule {
+        if (when != null && otherwise) {
+            throw new IllegalArgumentException(
+                    "Rule cannot have both 'when' and 'otherwise'");
+        }
+        if (when == null && !otherwise) {
+            throw new IllegalArgumentException(
+                    "Rule must have either 'when' or 'otherwise'");
+        }
+    }
+}
 ```
-This is targeted to the one record that needs it — all other types retain full unknown-property
-detection (typos in SituationDefinition, GanglionDescriptor, etc. produce deserialization errors).
 
-Post-deserialization validation in `YamlSituationDefinitionProvider` enforces that `otherwise`
-rules appear only as the last rule in the list, and that each rule has exactly one of `when`
-or `otherwise`.
+This preserves the mutual-exclusion validation from the manual parser. If `@JsonIgnoreProperties`
+were used instead, Jackson would discard `otherwise` and post-deserialization code would see
+`when == null` for BOTH legitimate otherwise rules AND rules that accidentally omit both keys —
+losing the explicit-intent signal.
+
+The existing YAML convention `otherwise:` (null value, no `true`) produces `false` for a
+`boolean` record parameter. Standardise on `otherwise: true` — this is a deliberate format
+change that makes intent explicit and works naturally with Jackson record deserialization.
+Existing YAML files need a mechanical update: `otherwise:` → `otherwise: true`.
+
+No `@JsonIgnoreProperties` or `FAIL_ON_UNKNOWN_PROPERTIES=false` needed — `otherwise` is
+a real field, and all other types retain full unknown-property detection.
 
 **SituationDefinition compact constructor:** The record's compact constructor validates
 `eventTypes != null && !eventTypes.isEmpty()` and `chainMode != null`. Jackson populates
@@ -195,14 +212,19 @@ correlationKey:
 
 Logic:
 1. Read node as tree (`JsonNode`)
-2. If null → return null
-3. If text → create evaluator using default language (JQ), consistent with the engine's
-   `ExpressionEvaluatorDeserializer` which also defaults to JQ for text nodes
-4. If object → read `expression` (string) and `language` (string)
-5. Create appropriate evaluator:
+2. If `null` (Java null) or `node.isNull()` (YAML explicit `null` → `NullNode`) → return null.
+   Both checks required: `readValueAsTree()` returns Java null for absent values,
+   `NullNode` for YAML `correlationKey: null`.
+3. If text → `new JQExpressionEvaluator(node.textValue())`. JQ is the default language,
+   consistent with the engine's `ExpressionEvaluatorDeserializer` convention.
+4. If object → read `expression` (required) and `language` (required):
+   - Missing `expression` key → throw: `"Expression object missing required 'expression' field"`
+   - Missing `language` key → throw: `"Expression object missing required 'language' field"`
    - `"jq"` → `new JQExpressionEvaluator(expression)`
    - `"mvel"` → `new MvelExpressionEvaluator(expression)`
-   - other → throw with descriptive error
+   - other → throw: `"Unknown expression language '<lang>'. Expected: jq, mvel"`
+5. Any other node type (number, array, boolean) → throw:
+   `"Expected expression as string or {expression, language} object, got <nodeType>"`
 
 Text-node handling (step 3) is a defensive fallback — all current ras YAML expression fields
 except `NaiveBayes.Feature` use the object form. Feature is handled by its own `@JsonCreator`
@@ -240,9 +262,10 @@ duplicate type resolution caches and serializer/deserializer lookup tables.
 `ACCEPT_CASE_INSENSITIVE_ENUMS` preserves the case-insensitive contract established by the
 manual parser's `.toUpperCase()` calls on `DetectionSignal` and `ChangeType` values.
 
-No `FAIL_ON_UNKNOWN_PROPERTIES=false` — the `otherwise` key is handled by
-`@JsonIgnoreProperties({"otherwise"})` on `ExpressionRules.Rule` (see §1), keeping full
-unknown-property detection for all other types.
+No `FAIL_ON_UNKNOWN_PROPERTIES=false` — the `otherwise` key is a real `boolean` field on
+`ExpressionRules.Rule` (see §1), so no special handling is needed. All types retain full
+unknown-property detection: a typo like `corelationKey` or `chainode` produces a
+deserialization error instead of being silently ignored.
 
 Shared between `YamlSituationDefinitionProvider` and `SituationYamlRegistrar`.
 
