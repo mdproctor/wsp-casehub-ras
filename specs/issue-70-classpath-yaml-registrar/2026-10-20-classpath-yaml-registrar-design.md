@@ -17,10 +17,50 @@ Four deliverables:
 
 ## 1. Jackson Annotations on Domain Types (api/)
 
-### Already annotated
+### Already annotated (polymorphic dispatch)
 - `ChainMode` — `@JsonTypeInfo(property="type")` + `@JsonSubTypes` for all 7 variants
 - `TriggerAction` — `@JsonTypeInfo(property="type")` + `@JsonSubTypes` for `create-case`, `notify-only`
 - `TriggerMode` — `@JsonTypeInfo(property="type")` + `@JsonSubTypes` for `fire-once`, `repeating`
+
+### Additional annotations needed on already-annotated types
+
+**ChainMode.And** — YAML key is `ganglia`, but record parameter is `requiredGanglia`:
+```java
+record And(@JsonProperty("ganglia") Set<String> requiredGanglia) implements ChainMode {
+```
+
+**ChainMode.Sequence** — YAML key is `ganglia`, but record parameter is `orderedGanglia`:
+```java
+record Sequence(@JsonProperty("ganglia") List<String> orderedGanglia) implements ChainMode {
+```
+
+Without these, Jackson looks for `requiredGanglia`/`orderedGanglia` keys, finds neither, and
+the compact constructors throw on null/empty.
+
+**TriggerAction.CreateCase** — The YAML format puts `caseNamespace`, `caseName`, `caseVersion`,
+`baseCaseData` as flat sibling keys alongside `type`. But `CreateCase(CaseTriggerConfig config)`
+wraps them in a single nested parameter. Jackson's polymorphic deserialization strips `type` and
+tries to match remaining flat keys to `CreateCase` parameters — it finds no `config` key.
+
+Fix: add a `@JsonCreator` static factory that takes the flat properties and constructs
+`CaseTriggerConfig` internally:
+```java
+record CreateCase(CaseTriggerConfig config) implements TriggerAction {
+    public CreateCase {
+        Objects.requireNonNull(config, "config");
+    }
+
+    @JsonCreator
+    public static CreateCase fromYaml(
+            @JsonProperty("caseNamespace") String caseNamespace,
+            @JsonProperty("caseName") String caseName,
+            @JsonProperty("caseVersion") String caseVersion,
+            @JsonProperty("baseCaseData") Map<String, Object> baseCaseData) {
+        return new CreateCase(new CaseTriggerConfig(
+                caseNamespace, caseName, caseVersion, baseCaseData));
+    }
+}
+```
 
 ### Need annotations
 
@@ -40,35 +80,98 @@ Consistent with ChainMode, TriggerAction, TriggerMode.
 - `correlationKey` (YAML) → `correlationKeyExpression` (record): add `@JsonProperty("correlationKey")`
 - `feedback` (YAML) → `feedbackConfig` (record): add `@JsonProperty("feedback")`
 
-**FeedbackConfig** — record parameter names already match YAML keys (`noiseLabels`,
-`confirmedLabels`, `suppressionCooldown`, `learningRate`, `retentionPeriod`, `tuningEnabled`,
-`overSensitiveThreshold`, `underSensitiveThreshold`, `crossRefWindow`). Duration fields
-handled by `JavaTimeModule`. No annotations needed.
+**FeedbackConfig** — record parameter names already match YAML keys. Duration fields
+handled by `JavaTimeModule`. No annotations needed, but the compact constructor must
+apply defaults for three optional fields that Jackson cannot default on its own.
+
+Jackson always uses the canonical (all-parameter) constructor for records. When optional
+YAML keys are absent, Jackson passes `null` for object types and `0.0` for `double`:
+- `crossRefWindow` absent → `null` → compact constructor null-coalesces to `Duration.ofHours(1)`
+- `overSensitiveThreshold` absent → `0.0` → compact constructor replaces with `0.5`
+- `underSensitiveThreshold` absent → `0.0` → compact constructor replaces with `0.5`
+
+The defaults must be applied BEFORE validation in the compact constructor:
+```java
+public FeedbackConfig {
+    crossRefWindow = crossRefWindow != null ? crossRefWindow : Duration.ofHours(1);
+    overSensitiveThreshold = overSensitiveThreshold == 0.0 ? 0.5 : overSensitiveThreshold;
+    underSensitiveThreshold = underSensitiveThreshold == 0.0 ? 0.5 : underSensitiveThreshold;
+
+    Objects.requireNonNull(noiseLabels, "noiseLabels");
+    // ... remaining validation unchanged
+}
+```
+
+Using `0.0` as the sentinel is safe because the validation already requires `> 0.0` — a user
+who explicitly writes `0.0` gets the default instead, but `0.0` was never valid anyway.
 
 **DetectionSignal** — enum used in GanglionDescriptor.ExpressionRules.Rule. YAML values
-are uppercase (`DETECTED`, `WEAK`, `NOISE`, `ANTI`), matching enum constant names. No
-annotations needed — Jackson handles this by default.
+are uppercase (`DETECTED`, `WEAK`, `NOISE`, `ANTI`), matching enum constant names.
 
 **SituationChangeEvent.ChangeType** — enum used as map key in
-GanglionDescriptor.SituationWatcher.changeTypeMapping. Same uppercase convention. No
-annotations needed.
+GanglionDescriptor.SituationWatcher.changeTypeMapping. Same uppercase convention.
+
+**Case-insensitive parsing:** The existing manual parser calls `.toUpperCase()` before
+`valueOf()` for both enums, establishing a case-insensitive contract. To preserve this,
+`RasYamlMapper` configures `MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS` (see §2).
+No per-enum annotations needed.
 
 ### Nested types in GanglionDescriptor
 
 - `NaiveBayes.Feature` — record with `ExpressionEvaluator expression`, `List<String> values`,
-  `double[][] likelihoods`. `expression` field handled by the ExpressionEvaluator deserializer.
-  `values` and `likelihoods` handled by Jackson natively.
+  `double[][] likelihoods`. The YAML format puts `expression` and `language` as flat siblings
+  alongside `values` and `likelihoods` — Jackson's per-field deserializer cannot see sibling keys,
+  so the ExpressionEvaluator deserializer alone cannot construct the evaluator.
+
+  Fix: add a `@JsonCreator` static factory that reads all four keys:
+  ```java
+  public record Feature(
+          ExpressionEvaluator expression,
+          List<String> values,
+          double[][] likelihoods
+  ) {
+      @JsonCreator
+      public static Feature fromYaml(
+              @JsonProperty("expression") String expressionText,
+              @JsonProperty("language") String language,
+              @JsonProperty("values") List<String> values,
+              @JsonProperty("likelihoods") double[][] likelihoods) {
+          ExpressionEvaluator evaluator = switch (language) {
+              case "jq" -> new JQExpressionEvaluator(expressionText);
+              case "mvel" -> new MvelExpressionEvaluator(expressionText);
+              default -> throw new IllegalArgumentException(
+                      "Unknown expression language: " + language);
+          };
+          return new Feature(evaluator, values, likelihoods);
+      }
+  }
+  ```
+  This bypasses the ExpressionEvaluator deserializer for Feature (which is correct — the factory
+  handles expression construction directly). All other ExpressionEvaluator fields (correlationKey,
+  eventFilter, etc.) are nested objects and use the deserializer normally.
 - `NaiveBayes.SignalMapping` — plain record, all primitive/boxed fields. No annotations needed.
 - `ExpressionRules.Rule` — has `ExpressionEvaluator when`, `DetectionSignal signal`,
   `double confidence`, `ExpressionEvaluator confidenceExpression`,
   `Map<String, ExpressionEvaluator> evidenceTemplates`. The `when` field is nullable
-  (null for `otherwise` rules) — Jackson handles nullable record parameters. Add
-  `@JsonProperty("otherwise")` handling via a `@JsonIgnore` or let Jackson skip unknown
-  properties (FAIL_ON_UNKNOWN_PROPERTIES=false).
+  (null for `otherwise` rules) — Jackson handles nullable record parameters.
 
 **otherwise handling:** The YAML for `otherwise` rules uses `otherwise: true` instead of `when`.
-Jackson with FAIL_ON_UNKNOWN_PROPERTIES=false will ignore the `otherwise` key. The `when` field
-will be null (absent from YAML), which is the correct representation for an otherwise rule.
+Add `@JsonIgnoreProperties({"otherwise"})` on `ExpressionRules.Rule` so Jackson ignores the
+`otherwise` key. The `when` field will be null (absent from YAML), which is the correct
+representation for an otherwise rule:
+```java
+@JsonIgnoreProperties({"otherwise"})
+public record Rule(
+        ExpressionEvaluator when,
+        DetectionSignal signal,
+        double confidence,
+        ExpressionEvaluator confidenceExpression,
+        Map<String, ExpressionEvaluator> evidenceTemplates
+) {}
+```
+This is targeted to the one record that needs it — all other types retain full unknown-property
+detection (typos in SituationDefinition, GanglionDescriptor, etc. produce deserialization errors).
+
 Post-deserialization validation in `YamlSituationDefinitionProvider` enforces that `otherwise`
 rules appear only as the last rule in the list, and that each rule has exactly one of `when`
 or `otherwise`.
@@ -93,11 +196,17 @@ correlationKey:
 Logic:
 1. Read node as tree (`JsonNode`)
 2. If null → return null
-3. If object → read `expression` (string) and `language` (string)
-4. Create appropriate evaluator:
+3. If text → create evaluator using default language (JQ), consistent with the engine's
+   `ExpressionEvaluatorDeserializer` which also defaults to JQ for text nodes
+4. If object → read `expression` (string) and `language` (string)
+5. Create appropriate evaluator:
    - `"jq"` → `new JQExpressionEvaluator(expression)`
    - `"mvel"` → `new MvelExpressionEvaluator(expression)`
    - other → throw with descriptive error
+
+Text-node handling (step 3) is a defensive fallback — all current ras YAML expression fields
+except `NaiveBayes.Feature` use the object form. Feature is handled by its own `@JsonCreator`
+factory (see §1), so this deserializer is not invoked for Feature at all.
 
 Returns platform `StringExpressionEvaluator` implementations directly. The
 `SituationDefinitionRegistry.compileExpression()` already handles these via pattern matching
@@ -108,16 +217,32 @@ on `StringExpressionEvaluator`.
 New utility: `RasYamlMapper` (package-private in runtime/)
 
 ```java
-static ObjectMapper create() {
-    var mapper = new ObjectMapper(new YAMLFactory());
-    mapper.registerModule(new JavaTimeModule());
-    var module = new SimpleModule();
-    module.addDeserializer(ExpressionEvaluator.class, new ExpressionEvaluatorDeserializer());
-    mapper.registerModule(module);
-    mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    return mapper;
+class RasYamlMapper {
+    private static final ObjectMapper INSTANCE = build();
+
+    static ObjectMapper instance() { return INSTANCE; }
+
+    private static ObjectMapper build() {
+        var mapper = new ObjectMapper(new YAMLFactory());
+        mapper.registerModule(new JavaTimeModule());
+        var module = new SimpleModule();
+        module.addDeserializer(ExpressionEvaluator.class, new ExpressionEvaluatorDeserializer());
+        mapper.registerModule(module);
+        mapper.enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS);
+        return mapper;
+    }
 }
 ```
+
+Singleton — Jackson `ObjectMapper` is thread-safe after configuration. A shared instance avoids
+duplicate type resolution caches and serializer/deserializer lookup tables.
+
+`ACCEPT_CASE_INSENSITIVE_ENUMS` preserves the case-insensitive contract established by the
+manual parser's `.toUpperCase()` calls on `DetectionSignal` and `ChangeType` values.
+
+No `FAIL_ON_UNKNOWN_PROPERTIES=false` — the `otherwise` key is handled by
+`@JsonIgnoreProperties({"otherwise"})` on `ExpressionRules.Rule` (see §1), keeping full
+unknown-property detection for all other types.
 
 Shared between `YamlSituationDefinitionProvider` and `SituationYamlRegistrar`.
 
@@ -136,7 +261,8 @@ Replace `new Yaml().load(inputStream)` with `objectMapper.readTree(inputStream)`
 - `parseGanglia()` + `parseNaiveBayesGanglion()` + `parseExpressionRulesGanglion()` +
   `parseSituationWatcherGanglion()` → replaced by
   `objectMapper.treeToValue(node, GanglionDescriptor.class)` with Jackson polymorphic dispatch
-- `parseNaiveBayesFeature()` + `parseSignalMapping()` → handled by nested record deserialization
+- `parseNaiveBayesFeature()` → handled by `Feature.fromYaml()` `@JsonCreator` (see §1)
+- `parseSignalMapping()` → handled by record deserialization
 - `parseExpressionEntry()` + `parseExpressionEvaluator()` → handled by ExpressionEvaluatorDeserializer
 - `parseEvidenceTemplates()` + `parseOutcomeEvidenceTemplates()` + `parseDynamicCaseData()` →
   handled by `Map<String, ExpressionEvaluator>` deserialization
@@ -186,8 +312,28 @@ or migrate to compact constructors on the relevant records/descriptors.
 ### SnakeYAML dependency removal
 
 After migration, remove `org.yaml.snakeyaml` import from `YamlSituationDefinitionProvider`.
-SnakeYAML is a transitive dependency of `jackson-dataformat-yaml` (Jackson uses it internally),
-so no POM change needed — just no direct usage.
+`jackson-dataformat-yaml` is a transitive dependency of `casehub-platform` (already in the POM),
+and SnakeYAML is a transitive dependency of `jackson-dataformat-yaml` (Jackson uses it internally).
+No POM change needed — just no direct SnakeYAML usage.
+
+## 3.1. Relationship: YamlSituationDefinitionProvider vs SituationYamlRegistrar
+
+These two mechanisms are **complementary** — both active in the same deployment:
+
+| | YamlSituationDefinitionProvider | SituationYamlRegistrar |
+|---|---|---|
+| **Source** | Monolithic `META-INF/ras-situations.yaml` | Individual YAML files from `situations/` classpath dir |
+| **Lifecycle** | CDI construction (Phase 3 of `SituationDefinitionRegistry`) | `StartupEvent` via `ClasspathBootstrap` (after CDI construction) |
+| **Templates** | Full template resolution (parameter substitution, deep merge) | No template support — files are standalone definitions |
+| **Ganglia** | Provides both ganglia and situations | Situations only — must reference pre-existing ganglia |
+
+**Duplicate situationId:** If a situation ID appears in both the monolithic YAML and an
+individual file, `SituationDefinitionRegistry.register()` throws `IllegalStateException`.
+This is a configuration error, not a race condition — the provider always completes first.
+
+**Template support:** Individual YAML files go through `objectMapper.readValue(content,
+SituationDefinition.class)` — no template resolution. This is intentional: individual files
+are self-contained situation definitions meant for modular deployment, not template consumers.
 
 ## 4. New SituationYamlRegistrar (runtime/)
 
@@ -197,7 +343,7 @@ New class: `SituationYamlRegistrar implements ClasspathYamlRegistrar`
 @ApplicationScoped
 public class SituationYamlRegistrar implements ClasspathYamlRegistrar {
 
-    private static final ObjectMapper yamlMapper = RasYamlMapper.create();
+    private static final ObjectMapper yamlMapper = RasYamlMapper.instance();
 
     @Inject SituationRegistrar situationRegistrar;
 
@@ -207,16 +353,35 @@ public class SituationYamlRegistrar implements ClasspathYamlRegistrar {
 
     @Override
     public void register(String resourcePath, InputStream content) {
-        SituationDefinition definition = yamlMapper.readValue(content, SituationDefinition.class);
-        situationRegistrar.register(new SituationRegistration(definition));
+        try {
+            SituationDefinition definition = yamlMapper.readValue(content, SituationDefinition.class);
+            situationRegistrar.register(new SituationRegistration(definition));
+            LOG.debugf("Registered situation definition from %s: %s",
+                       resourcePath, definition.situationId());
+        } catch (IOException e) {
+            LOG.errorf(e, "Failed to load situation definition from %s", resourcePath);
+        } catch (Exception e) {
+            LOG.errorf(e, "Failed to register situation definition from %s", resourcePath);
+        }
     }
 }
 ```
 
+Error handling mirrors the engine's `SituationYamlRegistrar` pattern: catch and log per-file
+rather than propagating. `ClasspathBootstrap.scanAndRegister()` iterates discovered files
+without catching exceptions from `register()` — an unhandled exception from one file would
+abort the entire scan loop.
+
 No `isResolvable()` check — the registrar is only on the classpath when ras is deployed,
 so `SituationRegistrar` is always available.
 
-### Dependency addition
+**Ganglia constraint:** Situations registered via this path can only reference ganglia that
+are already registered through `SituationDefinitionProvider.ganglionDescriptors()` (Phase 1)
+or CDI `Ganglion` beans (Phase 2). The dynamic `register()` method validates ganglia existence
+but does not add new ganglia. Individual YAML files are situation-only — they do not define
+ganglia descriptors.
+
+### Dependency additions
 
 Add to runtime `pom.xml`:
 ```xml
@@ -226,7 +391,14 @@ Add to runtime `pom.xml`:
 </dependency>
 ```
 
-`casehub-platform-bootstrap` is already in the parent BOM (`dependencyManagement`).
+**Prerequisite:** `casehub-platform-bootstrap` is not yet in the parent BOM on main — it
+exists on a worktree branch (slot 216). If the BOM update has not landed when this spec is
+implemented, add an explicit version `${version.io.casehub}` to the dependency declaration.
+
+`jackson-dataformat-yaml` (provides `YAMLFactory` used by `RasYamlMapper`) is already a
+transitive dependency of `casehub-platform` — no explicit POM entry needed. After migration,
+SnakeYAML direct usage is removed but it remains on the classpath as a transitive dependency
+of `jackson-dataformat-yaml` (Jackson uses it internally).
 
 ## Testing Strategy
 
